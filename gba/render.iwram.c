@@ -256,7 +256,8 @@ typedef struct LayerPlan {
 } LayerPlan;
 
 ROM_CODE static void PlanLayers(LayerPlan *lp, uint8_t main_mask, uint8_t sub_mask,
-                                bool bg3hi, uint8_t obj_prios_used, int max_bg) {
+                                bool bg3hi, uint8_t obj_prios_used, int max_bg,
+                                bool hud_front) {
   const Plane *order = bg3hi ? kMode1Bg3Hi : kMode1;
   // Which planes show: a layer's hi plane if it has priority tiles, its low
   // plane always; sprite planes if some sprite uses them.
@@ -275,15 +276,28 @@ ROM_CODE static void PlanLayers(LayerPlan *lp, uint8_t main_mask, uint8_t sub_ma
       }
     }
   }
+  // With the HUD overlaid on the level, BG3's priority tiles (the HUD) go in
+  // front of everything: they're over rows of the level whose BG1 the SNES
+  // shows elsewhere (a castle's ceiling would cover them).
+  if (hud_front) {
+    for (int i = 0; i < n; i++) {
+      if (planes[i].layer == 2 && planes[i].prio) {
+        Plane hp = planes[i];
+        memmove(&planes[1], &planes[0], i * sizeof(Plane));
+        planes[0] = hp;
+        break;
+      }
+    }
+  }
   // Count the GBA BGs: two for a layer with both planes. Too many: show a
   // layer whole at its priority tiles' place, BG3 first (in Mode 1 with its
   // priority bit, BG3 is the text and HUD layer, drawn over the rest), then
   // BG2, then BG1.
   int nbg = 0;
   for (int i = 0; i < n; i++) nbg += planes[i].layer != kPlaneObj;
-  static const uint8_t kMergeOrder[3] = { 2, 1, 0 };
+  static const uint8_t kMergeOrder[2][3] = { { 2, 1, 0 }, { 1, 0, 2 } };
   for (int m = 0; m < 3 && nbg > max_bg; m++) {
-    int layer = kMergeOrder[m], hi = -1, lo = -1;
+    int layer = kMergeOrder[hud_front][m], hi = -1, lo = -1;
     for (int i = 0; i < n; i++) {
       if (planes[i].layer != layer) continue;
       if (planes[i].prio) hi = i; else lo = i;
@@ -455,11 +469,11 @@ void RenderBuildFrame(const ViewMap *vm) {
   int k0 = 0;
   if (tint) {
     k0 = (tm & 0x04) ? 2 : 1;
-    PlanLayers(&lp, tm & ~0x04, 0, (p->bgmode & 8) != 0, obj_used, 4 - k0);
+    PlanLayers(&lp, tm & ~0x04, 0, (p->bgmode & 8) != 0, obj_used, 4 - k0, false);
   }
   if (!tint) {
     k0 = 0;
-    PlanLayers(&lp, tm, sub_mask, (p->bgmode & 8) != 0, obj_used, 4);
+    PlanLayers(&lp, tm, sub_mask, (p->bgmode & 8) != 0, obj_used, 4, vm->hud_overlay);
   }
   fr->tint = tint;
 
