@@ -28,16 +28,10 @@ _start:
   .align 2
 
 start_vector:
-  @ A flash cartridge's menu (or anything else that ran before) may have
-  @ left the video memory and the I/O registers in any state: the BIOS's
-  @ RegisterRamReset clears the palettes, VRAM and OAM and resets the
-  @ serial, sound and other registers (not EWRAM and IWRAM: those are set
-  @ up below). It uses the supervisor stack.
-  mov   r0, #0x13
-  msr   cpsr_c, r0
-  ldr   sp, =__sp_svc
-  mov   r0, #0xfc
-  swi   0x010000
+  @ Interrupts off, whatever ran before (a flash cartridge's menu) left on;
+  @ main() resets the video memory and the registers it left.
+  mov   r0, #0x04000000
+  strb  r0, [r0, #0x208]       @ IME = 0
 
   @ Stacks for IRQ, supervisor and system mode; we run in system mode.
   mov   r0, #0x12

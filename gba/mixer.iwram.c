@@ -244,18 +244,21 @@ static const uint16_t kRecip[kChunk + 1] = {
   2731, 2621, 2521, 2427, 2341, 2260, 2185, 2114, 2048,
 };
 
+// A glide's step a sample: toward zero, so that it never goes past its end.
+static inline int32_t GlideStep(int32_t diff, int count) {
+  return diff >= 0 ? (diff * kRecip[count]) >> 16 : -((-diff * kRecip[count]) >> 16);
+}
+
 // Mixes count samples of a voice, its volumes gliding from where the last
 // chunk left them to its envelope's and volume registers' (0 if it's off).
+// The chunk ends exactly there: what the step's division leaves of the way
+// (less than count, of volumes up to 2031) is taken at once at its start.
 static void MixVoice(Voice *v, int32_t *mix, int count, const int16_t *noise) {
   int32_t tl = 0, tr = 0;
   if (v->on) tl = (v->env * v->vol_l) >> 7, tr = (v->env * v->vol_r) >> 7;
-  int32_t gl = v->gl_last, gr = v->gr_last;
-  int32_t dgl = ((tl - gl) * kRecip[count]) >> 16, dgr = ((tr - gr) * kRecip[count]) >> 16;
-  v->gl_last = gl + dgl * count, v->gr_last = gr + dgr * count;
-  if (!v->on) {
-    // Faded out: what's left of the glide's rounding goes too.
-    v->gl_last = v->gr_last = 0;
-  }
+  int32_t dgl = GlideStep(tl - v->gl_last, count), dgr = GlideStep(tr - v->gr_last, count);
+  int32_t gl = tl - dgl * count, gr = tr - dgr * count;
+  v->gl_last = tl, v->gr_last = tr;
   if (v->noise_src || v->lp_noise) {
     MixNoiseVoice(v, mix, count, noise, gl, gr, dgl, dgr);
     return;

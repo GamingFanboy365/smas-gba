@@ -161,7 +161,34 @@ static void RunGame(void) {
   }
 }
 
+// A flash cartridge's menu (or anything else that ran before) may have left
+// the video memory and the I/O registers in any state. This puts what the
+// program doesn't set up itself back to what a console starts a game with:
+// interrupts, DMA, timers and sound off, the video registers zero, the
+// palettes and VRAM clear, the sprites hidden. (Done here rather than with
+// the BIOS's RegisterRamReset, which also resets the serial port's mode.)
+static void HardwareReset(void) {
+  REG_IME = 0;
+  REG_DISPCNT = DCNT_BLANK;
+  for (int i = 0; i < 4; i++) {
+    REG_DMA_CNT(i) = 0;
+    REG_TM_CNT_H(i) = 0;
+  }
+  REG_IE = 0;
+  REG_IF = 0xffff;
+  REG_SOUNDCNT_X = 0;
+  // The BGs' controls and scrolling, the windows, mosaic and blending.
+  for (uint32_t a = 0x04000008; a < 0x04000056; a += 2) REG16(a) = 0;
+  volatile uint32_t *p = (volatile uint32_t *)PAL_BG;
+  for (int i = 0; i < 0x400 / 4; i++) p[i] = 0;
+  p = (volatile uint32_t *)VRAM;
+  for (int i = 0; i < 0x18000 / 4; i++) p[i] = 0;
+  p = (volatile uint32_t *)OAM;
+  for (int i = 0; i < 0x400 / 4; i += 2) p[i] = 0x200, p[i + 1] = 0;
+}
+
 int main(void) {
+  HardwareReset();
   REG_WAITCNT = 0x4317;  // ROM 3/1 wait states with prefetch, SRAM 8
   REG_DISPCNT = DCNT_BLANK;
   // Timers 2 and 3: a cycle counter.
