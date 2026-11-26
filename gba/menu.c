@@ -2,7 +2,9 @@
 // own HUD font from the player's ROM (its BG3 tiles at $09B000), with the
 // cursor sound of All-Stars' own game select: sound 1 on the driver's port
 // 3, which is the same driver, samples and sound data as SMB1's (compared
-// byte for byte with the SPC700's RAM while the real menu runs).
+// byte for byte with the SPC700's RAM while the real menu runs). Choosing a
+// game plays the sound the games' file select plays when a file is chosen
+// (and All-Stars' title when Start is pressed): sound 0x29 on port 3.
 #include <string.h>
 #include "gba_hw.h"
 #include "platform.h"
@@ -17,6 +19,8 @@ enum {
   kBlank = 0x28, kDash = 0x24, kCoin = 0x27,
   kSramChoice = 0x4000,      // after the two games' 8 KB each
   kCursorSound = 1,          // port 3
+  kSelectSound = 0x29,       // port 3
+  kSelectFrames = 32,        // the select sound (24 frames), the fade-out at its end
 };
 
 static const uint16_t kPalette[4] = {
@@ -55,11 +59,19 @@ static void LoadFont(const uint8_t *rom) {
   }
 }
 
+// A frame of the menu: the VBlank, then the sound driver's frame, given a
+// sound's number for that frame (0: none).
+static void MenuFrame(uint8_t sound) {
+  VBlankIntrWait();
+  ApuWritePort(3, sound);
+  AudioEndFrame();
+}
+
 static void Fade(bool in) {
   REG_BLDCNT = 0x3f | 3 << 6;
   for (int i = 0; i <= 16; i += 2) {
     REG_BLDY = in ? 16 - i : i;
-    VBlankIntrWait();
+    MenuFrame(0);
   }
 }
 
@@ -102,11 +114,9 @@ int MenuRun(void) {
       drawn = true;
     }
     if (frame == 0) Fade(true);
-    VBlankIntrWait();
     // The sound driver's frame: a sound's number for a frame, then 0.
-    ApuWritePort(3, sound);
+    MenuFrame(sound);
     sound = 0;
-    AudioEndFrame();
     uint16_t keys = ~REG_KEYINPUT & 0x3ff, pressed = keys & ~prev;
     prev = keys;
     if (pressed & (KEY_UP | KEY_DOWN | KEY_SELECT)) {
@@ -118,6 +128,9 @@ int MenuRun(void) {
       break;
   }
   SRAM[kSramChoice] = choice ? 0xa1 : 0xa0;
+  // The select sound, then the fade-out while it plays.
+  MenuFrame(kSelectSound);
+  for (int f = 1; f < kSelectFrames - 9; f++) MenuFrame(0);
   Fade(false);
   AudioStop();
   REG_DISPCNT = DCNT_BLANK;

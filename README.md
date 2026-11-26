@@ -52,7 +52,8 @@ hasn't been run on a real GBA by its author, though.
 ## Playing
 
 A game select comes first: Up, Down or Select to choose (with the cursor
-sound of the All-Stars menu), A or Start to play. The last choice is
+sound of the All-Stars menu), A or Start to play (with the sound of
+choosing a file in the games' own file select). The last choice is
 remembered.
 
 | GBA | In the games |
