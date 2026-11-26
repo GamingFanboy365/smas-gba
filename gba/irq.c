@@ -2,6 +2,7 @@
 // with interrupts off.
 #include "gba_hw.h"
 #include "audio.h"
+#include "render.h"
 #include "irq.h"
 
 volatile uint32_t g_vblank_count;
@@ -9,6 +10,7 @@ volatile uint32_t g_vblank_count;
 void IrqDispatch(uint32_t flags) {
   if (flags & IRQ_VBLANK) {
     g_vblank_count++;
+    RenderVBlank();
     AudioVBlank();
   }
   if (flags & IRQ_VCOUNT)

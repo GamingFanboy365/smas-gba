@@ -20,6 +20,9 @@
 //           select), by GBA frame; with -f, -k then starts with the game.
 //   -S      keeps the cartridge's SRAM in a file next to it (CART.sav),
 //           loaded at the start and written at the end.
+//   -E      FROM-TO: a picture of every GBA frame in the range (GBA frame
+//           numbers, whatever -f says), to DIR/eNNNNNN.png: shows what
+//           the screen does while a game frame takes more than one.
 //   -p      FROM-TO: profiles those frames by stepping the CPU, and writes
 //           "address cycles" lines to DIR/profile.txt (tools/profile.py
 //           sums them by function).
@@ -180,7 +183,7 @@ int main(int argc, char **argv) {
   FrameList shots = { 0 };
   MemDump dumps[16];
   int ndumps = 0;
-  int prof_from = -1, prof_to = -1;
+  int prof_from = -1, prof_to = -1, every_from = -1, every_to = -1;
   uint32_t frame_addr = 0, ram_addr = 0;
   bool keep_save = false;
   struct { int frame; char *spec; bool done; } pokes[16];
@@ -196,6 +199,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(a, "-q")) g_quiet = true;
     else if (!strcmp(a, "-S")) keep_save = true;
     else if (!strcmp(a, "-p")) { sscanf(v, "%d-%d", &prof_from, &prof_to); i++; }
+    else if (!strcmp(a, "-E")) { sscanf(v, "%d-%d", &every_from, &every_to); i++; }
     else if (!strcmp(a, "-f")) frame_addr = strtoul(v, NULL, 16), i++;
     else if (!strcmp(a, "-r")) ram_addr = strtoul(v, NULL, 16), i++;
     else if (!strcmp(a, "-w") && npokes < 16) {
@@ -315,6 +319,10 @@ int main(int argc, char **argv) {
       }
     } else if (InList(&shots, g_frame)) {
       snprintf(path, sizeof(path), "%s/g%06d.png", outdir, g_frame);
+      WritePng(path, pixels, w, h);
+    }
+    if (g_frame >= every_from && g_frame <= every_to) {
+      snprintf(path, sizeof(path), "%s/e%06d.png", outdir, g_frame);
       WritePng(path, pixels, w, h);
     }
     uint32_t gf_now = frame_addr ? core->busRead32(core, frame_addr) : 0;

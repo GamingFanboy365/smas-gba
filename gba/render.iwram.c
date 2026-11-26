@@ -53,7 +53,7 @@ static uint8_t s_map_size[3];
 static bool s_layout_valid;
 
 // Priority-tile counts per SNES layer and map row (rows 0-63).
-static uint16_t s_prio_rows[3][64];
+EWRAM_BSS static uint16_t s_prio_rows[3][64];
 static uint16_t s_prio_total[3];
 
 // Per-line tables for HBlank DMA, double buffered: scroll registers for
@@ -75,6 +75,11 @@ typedef struct FrameRegs {
   uint8_t squash;
 } FrameRegs;
 static FrameRegs s_regs[2];
+// The frame on screen, for RenderVBlank: its line table (NULL: none), where
+// its per-line color goes, and whether that changes down the screen.
+static const LineTable *volatile s_front;
+static volatile uint16_t *s_front_color;
+static bool s_front_per_line;
 EWRAM_BSS static uint16_t s_oam[2][512] __attribute__((aligned(4)));
 static bool s_oam_ready[2];
 
@@ -426,13 +431,13 @@ static bool MathOnLine(const LineRegs *l, const SnesPpu *p) {
 // ---- the squash ----
 // GBA line g shows SNES row s_rowmap[g]; s_linemap[r] is the first GBA line
 // showing row r or a later one (for sprites), negative above the first.
-static uint8_t s_rowmap[kGbaLines];
-static int16_t s_linemap[kSnesLines];
+EWRAM_BSS static uint8_t s_rowmap[kGbaLines];
+EWRAM_BSS static int16_t s_linemap[kSnesLines];
 
 // The title's text bands: rows of BG1's map with the font's tiles (0x00-
 // 0x2f, not the blank 0x24, 0x28). Its rows are kept whole; the title's
 // other rows give up the 32 that must go, spread evenly.
-static bool TitleTextBand(int map_row) {
+ROM_CODE static bool TitleTextBand(int map_row) {
   const uint16_t *m = &g_snes_vram[s_map_base[0] + (map_row & 31) * 32];
   for (int c = 0; c < 32; c++) {
     uint16_t t = m[c] & 0x3ff;
@@ -518,7 +523,7 @@ __attribute__((noinline)) static void BuildOam(uint16_t *out, const ViewMap *vm,
   // touching: Mario's eight tiles, a Koopa's) moves as one, by its bottom
   // row's place in the row map, so it keeps its shape and its feet stay on
   // the ground. s_shift is each sprite's move: SNES row minus GBA line.
-  static int16_t s_shift[128];
+  EWRAM_BSS static int16_t s_shift[128];
   if (vm->squash) {
     int start = 0;
     for (int i = 0; i <= 128; i++) {
@@ -573,7 +578,8 @@ __attribute__((noinline)) static void BuildOam(uint16_t *out, const ViewMap *vm,
 
 // ---- the frame ----
 
-void RenderInit(void) {
+ROM_CODE void RenderInit(void) {
+  s_front = NULL;
   InitSpread();
   // Transparent tiles.
   memset((void *)(VRAM + kBlankTile12 * 16), 0, 32);
@@ -773,9 +779,6 @@ ROM_CODE void RenderPresent(void) {
   FrameRegs *fr = &s_regs[b];
   LineTable *lt = &s_tables[b];
 
-  REG_DMA_CNT(0) = 0;
-  REG_DMA_CNT(3) = 0;
-
   CheckLayout();
   if (fr->squash != s_tiles_squashed) {
     // Only BG1/BG2's tiles are converted differently.
@@ -788,11 +791,18 @@ ROM_CODE void RenderPresent(void) {
   }
   ConvertDirtyVram();
   ConvertPalettes();
+
+  // If converting ran past the VBlank (a level's load), the registers wait
+  // for the next one: changed in mid-picture they'd tear it.
+  while (REG_VCOUNT < 160) {}
+
+  s_front = NULL;
+  REG_DMA_CNT(0) = 0;
+  REG_DMA_CNT(3) = 0;
   if (s_oam_ready[b]) {
     DmaCopy32(3, (void *)OAM, s_oam[b], 1024);
     s_oam_ready[b] = false;
   }
-
   if (fr->blank) {
     REG_DISPCNT = 0;
     REG_BLDCNT = 0x20 | 3 << 6;   // the backdrop, darkened to black
@@ -807,21 +817,41 @@ ROM_CODE void RenderPresent(void) {
   REG_BLDY = fr->bldy;
   REG_MOSAIC = fr->mosaic;
 
-  // Line 0's registers now; HBlank DMA brings each next line's.
+  // The per-line color is the backdrop's, or with the tint, the tint's.
+  if (fr->tint) PAL_BG[0] = g_snes_cgram[0];
+  s_front_color = fr->tint ? &PAL_BG[15 * 16 + 15] : &PAL_BG[0];
+  s_front_per_line = fr->backdrop_per_line;
+  s_front = lt;
+  RenderVBlank();
+}
+
+// Starts the picture's per-line registers from the top: line 0's written
+// now, HBlank DMA bringing each next line's from entry 1 on. Done when a
+// frame is presented and again at every VBlank (from its interrupt): a game
+// frame that takes more than one VBlank is shown again, and the DMAs, left
+// alone, would read on past the tables' ends.
+void RenderVBlank(void) {
+  const LineTable *lt = s_front;
+  if (!lt) return;
+  REG_DMA_CNT(0) = 0;
   volatile uint32_t *scroll_regs = (volatile uint32_t *)0x04000010;
   const uint32_t *line0 = (const uint32_t *)lt->scroll[0];
   for (int i = 0; i < 4; i++) scroll_regs[i] = line0[i];
   REG_DMA_SAD(0) = (uint32_t)lt->scroll[1];
   REG_DMA_DAD(0) = 0x04000010;
   REG_DMA_CNT(0) = 4 | DMA_32 | DMA_DST_RELOAD | DMA_REPEAT | DMA_AT_HBLANK | DMA_ENABLE;
-  // The per-line color is the backdrop's, or with the tint, the tint's.
-  volatile uint16_t *line_color = fr->tint ? &PAL_BG[15 * 16 + 15] : &PAL_BG[0];
-  if (fr->tint) PAL_BG[0] = g_snes_cgram[0];
-  *line_color = lt->backdrop[0];
-  if (fr->backdrop_per_line) {
+  *s_front_color = lt->backdrop[0];
+  if (s_front_per_line) {
+    REG_DMA_CNT(3) = 0;
     REG_DMA_SAD(3) = (uint32_t)&lt->backdrop[1];
-    REG_DMA_DAD(3) = (uint32_t)line_color;
+    REG_DMA_DAD(3) = (uint32_t)s_front_color;
     REG_DMA_CNT(3) = 1 | DMA_16 | DMA_DST_FIXED | DMA_REPEAT | DMA_AT_HBLANK | DMA_ENABLE;
   }
 }
 
+// Stops the per-line registers (leaving for the game select).
+ROM_CODE void RenderStop(void) {
+  s_front = NULL;
+  REG_DMA_CNT(0) = 0;
+  REG_DMA_CNT(3) = 0;
+}

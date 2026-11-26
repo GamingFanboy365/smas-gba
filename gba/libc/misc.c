@@ -61,9 +61,19 @@ void exit(int code) { printf("exit(%d)", code); for (;;) {} }
 #define REG_DEBUG_FLAGS (*(volatile uint16_t *)0x04FFF700)
 #define REG_DEBUG_STRING ((volatile char *)0x04FFF600)
 
+// Whether there is anyone to print to: mGBA answers 0x1DEA. On hardware
+// and other emulators printf does nothing, and costs nothing.
+static bool DebugAvailable(void) {
+  static uint8_t state;  // 0 unknown, 1 yes, 2 no
+  if (!state) {
+    REG_DEBUG_ENABLE = 0xC0DE;
+    state = REG_DEBUG_ENABLE == 0x1DEA ? 1 : 2;
+  }
+  return state == 1;
+}
+
 static void DebugWrite(const char *s, size_t n) {
-  static bool inited;
-  if (!inited) { REG_DEBUG_ENABLE = 0xC0DE; inited = true; }
+  if (!DebugAvailable()) return;
   if (n > 255) n = 255;
   for (size_t i = 0; i < n; i++) REG_DEBUG_STRING[i] = s[i];
   REG_DEBUG_STRING[n] = 0;
@@ -139,6 +149,7 @@ int sprintf(char *buf, const char *fmt, ...) {
 }
 
 static int VPrint(const char *fmt, va_list ap) {
+  if (!DebugAvailable()) return 0;
   char buf[256];
   int n = vsnprintf(buf, sizeof(buf), fmt, ap);
   // One log line per call; strip a trailing newline.

@@ -116,6 +116,7 @@ static void RunGame(void) {
     if (SoftResetHeld()) {
       GameSyncSram(true);
       AudioStop();
+      RenderStop();
       return;
     }
     uint32_t t0 = CycleCount();

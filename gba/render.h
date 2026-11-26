@@ -28,3 +28,7 @@ void RenderInit(void);
 // buffers; RenderPresent puts it on screen (at VBlank).
 void RenderBuildFrame(const ViewMap *vm);
 void RenderPresent(void);
+// Restarts the picture's per-line registers; called from the VBlank interrupt.
+void RenderVBlank(void);
+// Stops them (leaving a game).
+void RenderStop(void);
