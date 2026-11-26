@@ -88,11 +88,11 @@ ROM_CODE static void InitSpread(void) {
   }
 }
 
-// On squashed screens the text layer's tiles lose row 5 (the title) or rows
-// 0 and 7 (the intro card). BG1/BG2's tiles are converted with the dropped
-// row merged into its neighbor: the neighbor's pixel where it has one, the
-// dropped row's where it's empty, so the outline shows past the letters'
-// ends. BG3's font (the HUD, white over the sky) reads better left alone.
+// On the screens between levels (the full squash) the text layer's tiles
+// lose rows 0 and 7. BG1/BG2's tiles are converted with them merged into
+// rows 1 and 6: the inner row's pixel where it has one, the dropped row's
+// where it's empty. BG3's font (the HUD, white over the sky) reads better
+// left alone. The title keeps its text rows whole and needs none of it.
 static uint8_t s_tiles_squashed;  // the kSquash mode the BG tiles are in
 
 // a's pixels where a has one, b's elsewhere.
@@ -110,12 +110,8 @@ static void Convert4bpp(volatile uint32_t *dst, const uint16_t *src, bool merge)
     rows[y] = sp[lo & 0xff] | sp[lo >> 8] << 1 | sp[hi & 0xff] << 2 | sp[hi >> 8] << 3;
   }
   if (merge) {
-    if (s_tiles_squashed == kSquashFull) {
-      rows[1] = MergeRows(rows[1], rows[0]);
-      rows[6] = MergeRows(rows[6], rows[7]);
-    } else {
-      rows[4] = MergeRows(rows[4], rows[5]);
-    }
+    rows[1] = MergeRows(rows[1], rows[0]);
+    rows[6] = MergeRows(rows[6], rows[7]);
   }
   for (int y = 0; y < 8; y++) dst[y] = rows[y];
 }
@@ -175,7 +171,7 @@ static void ConvertChunk(uint32_t a) {
   if (InRange(a, s_bg12_base, 0x4000)) {
     uint32_t t = (a - s_bg12_base) >> 4;
     if (t != kBlankTile12)
-      Convert4bpp((volatile uint32_t *)(VRAM + t * 16), src, s_tiles_squashed != kSquashNone);
+      Convert4bpp((volatile uint32_t *)(VRAM + t * 16), src, s_tiles_squashed == kSquashFull);
   }
   if (InRange(a, s_bg3_base, 0x800)) {
     uint32_t t = (a - s_bg3_base) >> 3;
@@ -420,30 +416,67 @@ static bool MathOnLine(const LineRegs *l, const SnesPpu *p) {
 static uint8_t s_rowmap[kGbaLines];
 static int16_t s_linemap[kSnesLines];
 
+// The title's text bands: rows of BG1's map with the font's tiles (0x00-
+// 0x2f, not the blank 0x24, 0x28). Its rows are kept whole; the title's
+// other rows give up the 32 that must go, spread evenly.
+static bool TitleTextBand(int map_row) {
+  const uint16_t *m = &g_snes_vram[s_map_base[0] + (map_row & 31) * 32];
+  for (int c = 0; c < 32; c++) {
+    uint16_t t = m[c] & 0x3ff;
+    if (t < 0x30 && t != 0x24 && t != 0x28) return true;
+  }
+  return false;
+}
+
 ROM_CODE static void BuildSquashMap(int mode, int vofs3, int vofs1) {
   static int last_mode = -1, last3 = -1, last1 = -1;
-  if (mode == last_mode && vofs3 == last3 && vofs1 == last1) return;
-  last_mode = mode, last3 = vofs3, last1 = vofs1;
-  // Keep the rows that aren't the first or last of a tile row of the layer
-  // with the text: the font's glyphs have their fill in rows 1-6 and their
-  // outlines in 0 and 7. BG3 has the HUD (rows 0-31), BG2 the menus below.
-  // The full squash keeps 168 of 224 and drops the first and last 4 more;
-  // the title's (rows 32 on, below the HUD, only each tile row's
-  // row 5 dropped: of the menu font's 36 glyphs, 21 repeat it in row 4 or
-  // 6, and its outlines in rows 0 and 7 stay) keeps 168 of 192, the last 8
-  // off the bottom.
-  int first = mode == kSquashTitle ? 32 : 0;
-  int skip = mode == kSquashTitle ? 0 : 4;  // kept rows cut at the top
-  int kept = 0, g = 0;
-  for (int r = 0; r < kSnesLines; r++) {
-    if (r < first) {
-      s_linemap[r] = -1 - (first - 1 - r);
-      continue;
+  // The title's text is on BG1: its bands follow BG1's scroll.
+  if (mode == kSquashTitle) vofs1 = g_line_scroll[kSnesLines / 2][0] >> 16;
+  static uint32_t last_bands;
+  uint32_t bands = 0;
+  if (mode == kSquashTitle) {
+    for (int b = 0; b < 32; b++)
+      if (TitleTextBand(b)) bands |= 1u << b;
+  }
+  if (mode == last_mode && vofs3 == last3 && vofs1 == last1 && bands == last_bands) return;
+  last_mode = mode, last3 = vofs3, last1 = vofs1, last_bands = bands;
+  int g = 0;
+  if (mode == kSquashTitle) {
+    // Rows 32-223 (no HUD): text rows kept, 32 of the others dropped.
+    enum { kFirst = 32 };
+    bool text[kSnesLines];
+    int droppable = 0;
+    for (int r = kFirst; r < kSnesLines; r++) {
+      int band = ((vofs1 + r + 1) >> 3) & 31;
+      text[r] = (bands >> band) & 1;
+      droppable += !text[r];
     }
-    int phase = ((r < 32 ? vofs3 : vofs1) + r + 1) & 7;
-    bool keep = mode == kSquashTitle ? phase != 5 : (phase != 0 && phase != 7);
-    if (keep && kept++ >= skip && g < kGbaLines) s_rowmap[g++] = r;
-    s_linemap[r] = g < kGbaLines ? g : kGbaLines;
+    int to_drop = (kSnesLines - kFirst) - kGbaLines, seen = 0;
+    for (int r = 0; r < kSnesLines; r++) {
+      if (r < kFirst) {
+        s_linemap[r] = -1 - (kFirst - 1 - r);
+        continue;
+      }
+      bool keep = true;
+      if (!text[r] && droppable > 0) {
+        // Drop this one if it takes the running count of drops up a step.
+        keep = (seen + 1) * to_drop / droppable == seen * to_drop / droppable;
+        seen++;
+      }
+      if (keep && g < kGbaLines) s_rowmap[g++] = r;
+      s_linemap[r] = g < kGbaLines ? g : kGbaLines;
+    }
+  } else {
+    // The whole screen: rows that aren't the first or last of a tile row of
+    // the text layer kept (the font's glyphs have their fill in rows 1-6,
+    // outlines in 0 and 7; BG3 has the HUD, rows 0-31, BG2 the rest), 168
+    // of 224, and the first and last 4 of those dropped too.
+    int kept = 0;
+    for (int r = 0; r < kSnesLines; r++) {
+      int phase = ((r < 32 ? vofs3 : vofs1) + r + 1) & 7;
+      if (phase != 0 && phase != 7 && kept++ >= 4 && g < kGbaLines) s_rowmap[g++] = r;
+      s_linemap[r] = g < kGbaLines ? g : kGbaLines;
+    }
   }
   while (g < kGbaLines) s_rowmap[g] = s_rowmap[g - 1], g++;
 }
@@ -629,11 +662,9 @@ void RenderBuildFrame(const ViewMap *vm) {
   bool half = (p->cgadsub & 0x40) != 0, subtract = (p->cgadsub & 0x80) != 0;
   uint16_t cg0 = g_snes_cgram[0];
   bool per_line_bd = false;
-  uint16_t bd = cg0;
-  int last_key = -1, last_st = -1;
-  uint16_t bd0 = 0;
-  // Without per-line scrolling, lines can share entries.
-  bool scroll_static = !(g_line_changed & 0xff);
+  // Each GBA line's SNES row (and BG3's, which with the HUD overlaid shows
+  // the HUD's rows at the top).
+  static uint8_t row_of[kGbaLines + 1], row3_of[kGbaLines + 1];
   for (int g = 0; g <= kGbaLines; g++) {
     int gl = g < kGbaLines ? g : kGbaLines - 1;
     bool top = vm->split && gl < vm->split;
@@ -641,9 +672,32 @@ void RenderBuildFrame(const ViewMap *vm) {
                        : gl + ((top && !vm->hud_overlay) ? vm->top_offset : vm->offset);
     if (r < 0) r = 0;
     if (r >= kSnesLines) r = kSnesLines - 1;
-    uint32_t *s = (uint32_t *)lt->scroll[g];
-    int st = g_line_state[r];
-    // The backdrop's (or the tint's) color, from the line's state.
+    int rh = r;
+    if (top && vm->hud_overlay) {
+      rh = gl + vm->top_offset;
+      if (rh < 0) rh = 0;
+    }
+    row_of[g] = r, row3_of[g] = rh;
+  }
+  // The scroll registers, a layer at a time: hofs + xoffset | vofs + 1 +
+  // row - line (line kGbaLines repeats the last one).
+  for (int k = 0; k < 4; k++) {
+    int layer = layer_of[k];
+    const uint8_t *rows = layer == 2 ? row3_of : row_of;
+    uint32_t *col = (uint32_t *)lt->scroll + k;
+    const uint32_t *sc = &g_line_scroll[0][layer];
+    for (int g = 0; g <= kGbaLines; g++) {
+      int gl = g < kGbaLines ? g : kGbaLines - 1;
+      int r = rows[g];
+      uint32_t v = sc[r * 4];
+      col[g * 4] = (((v & 0x3ff) + vm->xoffset) & 0xffff) | (((v >> 16) + 1 + r - gl) << 16);
+    }
+  }
+  // The backdrop's (or the tint's) color, from each line's state.
+  uint16_t bd = cg0, bd0 = 0;
+  int last_st = -1;
+  for (int g = 0; g <= kGbaLines; g++) {
+    int st = g_line_state[row_of[g]];
     if (st != last_st) {
       last_st = st;
       const LineRegs *lr = &g_line_states[st];
@@ -655,29 +709,6 @@ void RenderBuildFrame(const ViewMap *vm) {
     if (g == 0) bd0 = bd;
     lt->backdrop[g] = bd;
     if (bd != bd0) per_line_bd = true;
-    // Lines in the same region at the same distance between row and line
-    // (squashed lines skip rows) get the previous line's entry, when the
-    // scroll is the same on every line. The HUD's lines show other rows.
-    int key = (top || !scroll_static) ? -2 - g : (r - gl) & 0xff;
-    if (key == last_key && g != kGbaLines) {
-      const uint32_t *prev = (const uint32_t *)lt->scroll[g - 1];
-      s[0] = prev[0], s[1] = prev[1], s[2] = prev[2], s[3] = prev[3];
-      continue;
-    }
-    last_key = key;
-    // With the HUD overlaid, BG3 alone shows the HUD's rows at the top.
-    int rh = r;
-    if (top && vm->hud_overlay) {
-      rh = gl + vm->top_offset;
-      if (rh < 0) rh = 0;
-    }
-    const uint32_t *sc = g_line_scroll[r], *sh = g_line_scroll[rh];
-    for (int k = 0; k < 4; k++) {
-      int layer = layer_of[k];
-      uint32_t v = layer == 2 ? sh[2] : sc[layer];
-      uint32_t dv = 1 + (layer == 2 ? rh : r) - gl;
-      s[k] = (((v & 0x3ff) + vm->xoffset) & 0xffff) | (((v >> 16) + dv) << 16);
-    }
   }
   fr->backdrop_per_line = per_line_bd;
 

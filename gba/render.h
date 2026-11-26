@@ -16,8 +16,8 @@ typedef struct ViewMap {
   // Squashed instead (split and offsets unused):
   //   kSquashFull: the whole 224 rows in 160 lines, each 8-row tile row of
   //     the text layer losing its first and last row (screens between levels);
-  //   kSquashTitle: rows 32-214, without the HUD, each tile row losing only
-  //     its row 5 (the title).
+  //   kSquashTitle: rows 32-223, without the HUD, its text rows whole and
+  //     the 32 rows to lose spread over the rest (the title).
   uint8_t squash;
 } ViewMap;
 

@@ -487,8 +487,25 @@ static void HdmaStep(int i, int line) {
     uint8_t mode = c->dmap & 7;
     const uint8_t **src = (c->dmap & 0x40) ? &s_hdma_ind[i] : &s_hdma_table[i];
     int n = kTransferLength[mode];
-    for (int j = 0; j < n; j++)
-      PpuWrite(c->bbad + kBAdrOffsets[mode][j], *(*src)++);
+    if (mode == 2 && c->bbad >= 0x0d && c->bbad <= 0x14) {
+      // A scroll register written twice (the water levels' waves, every
+      // line): straight to it.
+      SnesPpu *p = &g_snes->ppu;
+      const uint8_t *d = *src;
+      uint16_t v = (d[1] << 8 | d[0]) & 0x3ff;
+      int k = (c->bbad - 0x0d) >> 1;
+      if (!((c->bbad - 0x0d) & 1)) {
+        if (p->cur.hofs[k] != v) p->cur.hofs[k] = v, g_line_changed |= kLineChanged_Hofs0 << k;
+        p->scroll_prev2 = d[1];
+      } else {
+        if (p->cur.vofs[k] != v) p->cur.vofs[k] = v, g_line_changed |= kLineChanged_Vofs0 << k;
+      }
+      p->scroll_prev = d[1];
+      *src += 2;
+    } else {
+      for (int j = 0; j < n; j++)
+        PpuWrite(c->bbad + kBAdrOffsets[mode][j], *(*src)++);
+    }
     if (c->dmap & 0x40) c->das += n; else c->a2a += n;
   }
   c->ntrl--;
