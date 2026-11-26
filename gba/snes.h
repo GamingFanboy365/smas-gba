@@ -79,10 +79,25 @@ enum { kMaxLineStates = kSnesLines + 1 };
 extern LineRegs g_line_states[kMaxLineStates];
 extern uint8_t g_line_state[kSnesLines];
 extern bool g_line_regs_dirty;
-// Each line's scroll registers, apart from the states (per-line scrolling,
-// the water levels' waves, would make a state of every line): for each
-// layer, hofs | vofs << 16.
-extern uint32_t g_line_scroll[kSnesLines][4];
+// Each line's scroll registers, apart from the states (scroll changes on
+// other lines than the rest): the distinct scroll records, in order (for
+// each layer, hofs | vofs << 16), and each line's index into them. Layers
+// whose scroll HDMA writes every line are baked: bit k of g_scroll_baked
+// means layer k's hofs is g_scroll_bake[k][line], bit 4 + k its vofs is
+// g_scroll_bake[4 + k][line].
+extern uint32_t g_scroll_states[kSnesLines + 1][4];
+extern uint8_t g_line_scroll_state[kSnesLines];
+extern uint8_t g_scroll_baked;
+extern uint16_t g_scroll_bake[8][kSnesLines];
+extern bool g_scroll_dirty;
+
+// A line's scroll for a layer: hofs | vofs << 16.
+static inline uint32_t LineScroll(int line, int layer) {
+  uint32_t v = g_scroll_states[g_line_scroll_state[line]][layer];
+  if (g_scroll_baked & (1 << layer)) v = (v & 0xffff0000) | g_scroll_bake[layer][line];
+  if (g_scroll_baked & (16 << layer)) v = (v & 0xffff) | (uint32_t)g_scroll_bake[4 + layer][line] << 16;
+  return v;
+}
 // Which line registers changed anywhere in the frame: bits of kLineChanged.
 extern uint32_t g_line_changed;
 enum {

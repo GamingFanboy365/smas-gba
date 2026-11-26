@@ -245,7 +245,7 @@ ROM_CODE static void CheckLayout(void) {
   }
 }
 
-static void ConvertDirtyVram(void) {
+__attribute__((noinline)) static void ConvertDirtyVram(void) {
   for (int w = 0; w < (int)(sizeof(g_vram_dirty) / 4); w++) {
     uint32_t bits = g_vram_dirty[w];
     if (!bits) continue;
@@ -444,7 +444,7 @@ static bool TitleTextBand(int map_row) {
 ROM_CODE static void BuildSquashMap(int mode, int vofs3, int vofs1) {
   static int last_mode = -1, last3 = -1, last1 = -1;
   // The title's text is on BG1: its bands follow BG1's scroll.
-  if (mode == kSquashTitle) vofs1 = g_line_scroll[kSnesLines / 2][0] >> 16;
+  if (mode == kSquashTitle) vofs1 = LineScroll(kSnesLines / 2, 0) >> 16;
   static uint32_t last_bands;
   uint32_t bands = 0;
   if (mode == kSquashTitle) {
@@ -500,7 +500,7 @@ static const uint8_t kObjSizes[8][2] = {
   {0, 1}, {0, 2}, {0, 3}, {1, 2}, {1, 3}, {2, 3}, {1, 2}, {1, 2},
 };
 
-static uint8_t ObjPriosUsed(void) {
+__attribute__((noinline)) static uint8_t ObjPriosUsed(void) {
   uint8_t used = 0;
   for (int i = 0; i < 128; i++) {
     uint8_t y = g_snes_oam[i * 4 + 1];
@@ -510,7 +510,7 @@ static uint8_t ObjPriosUsed(void) {
   return used;
 }
 
-static void BuildOam(uint16_t *out, const ViewMap *vm, const uint8_t *obj_prio) {
+__attribute__((noinline)) static void BuildOam(uint16_t *out, const ViewMap *vm, const uint8_t *obj_prio) {
   SnesPpu *p = &g_snes->ppu;
   const uint8_t *sizes = kObjSizes[p->obsel >> 5];
   static const uint8_t kPix[4] = { 8, 16, 32, 64 };
@@ -594,7 +594,7 @@ void RenderBuildFrame(const ViewMap *vm) {
   fr->blank = (p->inidisp & 0x80) != 0;
   fr->squash = vm->squash;
   if (vm->squash)
-    BuildSquashMap(vm->squash, g_line_scroll[0][2] >> 16, g_line_scroll[kSnesLines - 1][1] >> 16);
+    BuildSquashMap(vm->squash, LineScroll(0, 2) >> 16, LineScroll(kSnesLines - 1, 1) >> 16);
   uint8_t tm = g_line_states[g_line_state[0]].tm, ts = g_line_states[g_line_state[0]].ts;
   bool sub_add = (p->cgwsel & 2) && (p->cgadsub & 0x20) && !(p->cgadsub & 0x1f);
   uint8_t sub_mask = sub_add ? ts : 0;
@@ -694,16 +694,36 @@ void RenderBuildFrame(const ViewMap *vm) {
   }
   // The scroll registers, a layer at a time: hofs + xoffset | vofs + 1 +
   // row - line (line kGbaLines repeats the last one).
+  int nused = k0 + lp.nbg;
   for (int k = 0; k < 4; k++) {
     int layer = layer_of[k];
     const uint8_t *rows = layer == 2 ? row3_of : row_of;
     uint32_t *col = (uint32_t *)lt->scroll + k;
-    const uint32_t *sc = &g_line_scroll[0][layer];
+    if (k >= nused || (tint && k == tint_bg)) {
+      // Not shown, or the tint (one tile everywhere): no scroll.
+      for (int g = 0; g <= kGbaLines; g++) col[g * 4] = 0;
+      continue;
+    }
+    const uint32_t *states = &g_scroll_states[0][layer];
+    const uint16_t *bh = (g_scroll_baked & (1 << layer)) ? g_scroll_bake[layer] : NULL;
+    const uint16_t *bv = (g_scroll_baked & (16 << layer)) ? g_scroll_bake[4 + layer] : NULL;
+    uint32_t changes = (kLineChanged_Hofs0 | kLineChanged_Vofs0) << layer;
+    if (!bh && !bv && !(g_line_changed & changes)) {
+      // The same scroll on every line: only the row-line distance varies.
+      uint32_t v = states[0];
+      uint32_t h = ((v & 0x3ff) + vm->xoffset) & 0xffff, vv = (v >> 16) + 1;
+      for (int g = 0; g <= kGbaLines; g++) {
+        int gl = g < kGbaLines ? g : kGbaLines - 1;
+        col[g * 4] = h | ((vv + rows[g] - gl) << 16);
+      }
+      continue;
+    }
     for (int g = 0; g <= kGbaLines; g++) {
       int gl = g < kGbaLines ? g : kGbaLines - 1;
       int r = rows[g];
-      uint32_t v = sc[r * 4];
-      col[g * 4] = (((v & 0x3ff) + vm->xoffset) & 0xffff) | (((v >> 16) + 1 + r - gl) << 16);
+      uint32_t v = states[g_line_scroll_state[r] * 4];
+      uint32_t h = bh ? bh[r] : (v & 0x3ff), vv = bv ? bv[r] : (v >> 16);
+      col[g * 4] = ((h + vm->xoffset) & 0xffff) | ((vv + 1 + r - gl) << 16);
     }
   }
   // The backdrop's (or the tint's) color, from each line's state.
@@ -729,7 +749,7 @@ void RenderBuildFrame(const ViewMap *vm) {
   s_oam_ready[b] = true;
 }
 
-void RenderPresent(void) {
+ROM_CODE void RenderPresent(void) {
   int b = s_back;
   s_back ^= 1;
   FrameRegs *fr = &s_regs[b];

@@ -224,9 +224,9 @@ static void MixVoice(Voice *v, int32_t *mix, int count, const int16_t *noise) {
     return;
   }
   MixJob job = { v->pcm, pos, step, v->end, v->loop_back, gl, gr };
-  // Stepping over samples, interpolating buys nothing; below the mixer's
-  // rate, it keeps the steps from buzzing.
-  int alive = step >= 0x10000 ? MixNearest(&job, mix, count) : MixLinear(&job, mix, count);
+  // Stepping over samples, interpolating buys nothing; well below the
+  // mixer's rate (under half), it keeps the steps from buzzing.
+  int alive = step >= 0x8000 ? MixNearest(&job, mix, count) : MixLinear(&job, mix, count);
   v->pos = job.pos;
   if (!alive) {
     v->on = false;

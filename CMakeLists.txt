@@ -23,7 +23,7 @@ if(SMAS_TRACE)
   target_compile_definitions(smas.elf PRIVATE SMAS_TRACE=1)
 endif()
 target_compile_options(smas.elf PRIVATE
-  $<$<COMPILE_LANGUAGE:C>:-O2 -std=gnu11 -fno-strict-aliasing -ffunction-sections -fdata-sections
+  $<$<COMPILE_LANGUAGE:C>:-O2 -g -std=gnu11 -fno-strict-aliasing -ffunction-sections -fdata-sections
   -Wall -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unknown-pragmas
   -Wno-parentheses -Wno-unused-function -Wno-missing-braces -Wno-pointer-sign
   -Wno-char-subscripts -Wno-unused-value -Wno-misleading-indentation>)

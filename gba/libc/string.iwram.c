@@ -3,7 +3,7 @@
 #include <string.h>
 #include <stdint.h>
 
-void *memcpy(void *dst, const void *src, size_t n) {
+__attribute__((noinline)) void *memcpy(void *dst, const void *src, size_t n) {
   uint8_t *d = dst;
   const uint8_t *s = src;
   if (n >= 8 && (((uintptr_t)d ^ (uintptr_t)s) & 3) == 0) {
@@ -28,7 +28,7 @@ void *memcpy(void *dst, const void *src, size_t n) {
   return dst;
 }
 
-void *memmove(void *dst, const void *src, size_t n) {
+__attribute__((noinline)) void *memmove(void *dst, const void *src, size_t n) {
   uint8_t *d = dst;
   const uint8_t *s = src;
   if (d <= s || d >= s + n)
@@ -38,7 +38,7 @@ void *memmove(void *dst, const void *src, size_t n) {
   return dst;
 }
 
-void *memset(void *dst, int c, size_t n) {
+__attribute__((noinline)) void *memset(void *dst, int c, size_t n) {
   uint8_t *d = dst;
   uint8_t v = (uint8_t)c;
   if (n >= 8) {
