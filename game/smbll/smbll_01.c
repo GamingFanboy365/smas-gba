@@ -263,6 +263,11 @@ void Smbll_HandleLayersScroll() {
     ++*(uint16 *)&tempF7;
   } while (*(uint16 *)&tempF7 != 64);
   layers_scroll_0EEC = (layers_scroll_0EEC + 4) & 0x1FF;
+#if defined(SMAS_GBA)
+  // The same copies, 32 values at a time (this runs every frame under water).
+  for (i = 1; i != 8; i++)
+    memcpy(&layer3_tilemap_upload_buf[i * 32], &layer3_tilemap_upload_buf[0], 64);
+#else
   for (i = 62; (i & 0x80u) == 0; i -= 2) {
     v6 = i >> 1;
     v7 = layer3_tilemap_upload_buf[v6];
@@ -274,6 +279,7 @@ void Smbll_HandleLayersScroll() {
     layer3_tilemap_upload_buf[v6 + 192] = v7;
     layer3_tilemap_upload_buf[v6 + 224] = v7;
   }
+#endif
 }
 
 void Smbll_CODE_048B49() {

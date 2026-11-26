@@ -46,14 +46,14 @@ static int s_playing;
 // ---- the DSP interface the driver calls ----
 
 struct Dsp { int unused; };
-static uint8_t s_dsp_shadow[128];
+uint8_t g_dsp_shadow[128];  // the DSP registers as last written
 static struct Dsp s_dsp_handle;
 
 Dsp *dsp_init(uint8_t *ram) { return &s_dsp_handle; }
 
 void dsp_reset(Dsp *dsp) {
-  memset(s_dsp_shadow, 0, sizeof(s_dsp_shadow));
-  s_dsp_shadow[0x6c] = 0xe0;
+  memset(g_dsp_shadow, 0, sizeof(g_dsp_shadow));
+  g_dsp_shadow[0x6c] = 0xe0;
   // The driver resets the DSP while it initializes, before the mixer runs.
   if (s_filling && s_filling->count < kMaxCommands)
     s_filling->cmd[s_filling->count++] = (DspCommand){ s_time, 0x6c, 0xe0 };
@@ -67,8 +67,8 @@ void dsp_write(Dsp *dsp, uint8_t adr, uint8_t val) {
   if (adr == 0x4c || adr == 0x5c) {
     if (!val) return;
   } else {
-    if (s_dsp_shadow[adr] == val) return;
-    s_dsp_shadow[adr] = val;
+    if (g_dsp_shadow[adr] == val) return;
+    g_dsp_shadow[adr] = val;
   }
   if (s_filling->count < kMaxCommands)
     s_filling->cmd[s_filling->count++] = (DspCommand){ s_time, adr, val };

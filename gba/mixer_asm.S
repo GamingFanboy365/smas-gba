@@ -19,6 +19,26 @@
 MixNearest:
   stmfd sp!, {r4-r11, lr}
   ldmia r0, {r3, r4, r5, r6, r7, r8, r12}  @ pcm pos step end loop_back gl gr
+6:
+  @ Four samples at once when the sample's end isn't within them.
+  cmp   r2, #4
+  blt   1f
+  add   r9, r4, r5, lsl #2
+  cmp   r9, r6
+  bhs   1f
+  .rept 4
+  mov   r9, r4, lsr #16
+  add   r9, r3, r9, lsl #1
+  ldrsh r9, [r9]
+  ldmia r1, {r10, r11}
+  mla   r10, r9, r8, r10
+  mla   r11, r9, r12, r11
+  stmia r1!, {r10, r11}
+  add   r4, r4, r5
+  .endr
+  subs  r2, r2, #4
+  bne   6b
+  b     7f
 1:
   mov   r9, r4, lsr #16
   add   r9, r3, r9, lsl #1
@@ -32,7 +52,8 @@ MixNearest:
   bhs   3f
 2:
   subs  r2, r2, #1
-  bne   1b
+  bne   6b
+7:
   str   r4, [r0, #4]
   mov   r0, #1
   ldmfd sp!, {r4-r11, lr}

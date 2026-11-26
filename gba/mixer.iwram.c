@@ -268,7 +268,7 @@ void MixerRun(int from, int to) {
     int ticks = d->dsp_frac >> 16;
     d->dsp_frac &= 0xffff;
     int32_t *mix = &s_mix[at * 2];
-    for (int i = 0; i < count * 2; i++) mix[i] = 0;
+    memset(mix, 0, count * 2 * sizeof(int32_t));
     bool need_noise = d->non != 0;
     for (int k = 0; k < 8 && !need_noise; k++) need_noise = d->v[k].on && d->v[k].lp_noise;
     if (need_noise) MakeNoise(noise, count, (kDspPerOut + 0x8000) >> 16);

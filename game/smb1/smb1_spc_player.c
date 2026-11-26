@@ -322,6 +322,14 @@ static const uint8 kEffectByteLength[27] = { 1, 1, 2, 3, 0, 1, 2, 1, 2, 1, 1, 3,
 
 
 static void Dsp_Write(SmasSpcPlayer *p, uint8 reg, uint8 value) {
+#if defined(SMAS_GBA)
+  // The driver rewrites most registers every tick, unchanged: those stop
+  // here (gba/audio.c keeps the registers' values). KON and KOF act when
+  // written, so they always go through.
+  extern uint8 g_dsp_shadow[128];
+  if (reg != KON && reg != KOF && g_dsp_shadow[reg & 0x7f] == value)
+    return;
+#endif
   DspRegWriteHistory *hist = p->reg_write_history;
   if (hist) {
     if (hist->count < 256) {
