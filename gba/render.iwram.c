@@ -71,7 +71,7 @@ typedef struct FrameRegs {
   bool backdrop_per_line;
   bool blank;
   bool tint;              // the per-line color is the tint layer's, not the backdrop's
-  bool squash;
+  uint8_t squash;
 } FrameRegs;
 static FrameRegs s_regs[2];
 EWRAM_BSS static uint16_t s_oam[2][512] __attribute__((aligned(4)));
@@ -88,17 +88,18 @@ ROM_CODE static void InitSpread(void) {
   }
 }
 
-// On squashed screens (the title, the intro card) rows 0 and 7 of the text
-// layer's tiles aren't shown. BG1/BG2's tiles are converted with them merged
-// into rows 1 and 6, an edge row's pixel winning where it has one, so the
-// title menu's font (white letters over white clouds) keeps its outlines.
-// BG3's font (the HUD, white over the sky) reads better left alone.
-static bool s_tiles_squashed;
+// On squashed screens the text layer's tiles lose row 7 (the title) or rows
+// 0 and 7 (the intro card). BG1/BG2's tiles are converted with the dropped
+// row merged into its neighbor: the neighbor's pixel where it has one, the
+// dropped row's where it's empty, so the outline shows past the letters'
+// ends. BG3's font (the HUD, white over the sky) reads better left alone.
+static uint8_t s_tiles_squashed;  // the kSquash mode the BG tiles are in
 
-static inline uint32_t MergeRows(uint32_t edge, uint32_t inner) {
-  uint32_t m = (edge | edge >> 1 | edge >> 2 | edge >> 3) & 0x11111111;
+// a's pixels where a has one, b's elsewhere.
+static inline uint32_t MergeRows(uint32_t a, uint32_t b) {
+  uint32_t m = (a | a >> 1 | a >> 2 | a >> 3) & 0x11111111;
   m *= 0xf;
-  return (edge & m) | (inner & ~m);
+  return (a & m) | (b & ~m);
 }
 
 static void Convert4bpp(volatile uint32_t *dst, const uint16_t *src, bool merge) {
@@ -109,8 +110,8 @@ static void Convert4bpp(volatile uint32_t *dst, const uint16_t *src, bool merge)
     rows[y] = sp[lo & 0xff] | sp[lo >> 8] << 1 | sp[hi & 0xff] << 2 | sp[hi >> 8] << 3;
   }
   if (merge) {
-    rows[1] = MergeRows(rows[0], rows[1]);
-    rows[6] = MergeRows(rows[7], rows[6]);
+    if (s_tiles_squashed == kSquashFull) rows[1] = MergeRows(rows[1], rows[0]);
+    rows[6] = MergeRows(rows[6], rows[7]);
   }
   for (int y = 0; y < 8; y++) dst[y] = rows[y];
 }
@@ -170,7 +171,7 @@ static void ConvertChunk(uint32_t a) {
   if (InRange(a, s_bg12_base, 0x4000)) {
     uint32_t t = (a - s_bg12_base) >> 4;
     if (t != kBlankTile12)
-      Convert4bpp((volatile uint32_t *)(VRAM + t * 16), src, s_tiles_squashed);
+      Convert4bpp((volatile uint32_t *)(VRAM + t * 16), src, s_tiles_squashed != kSquashNone);
   }
   if (InRange(a, s_bg3_base, 0x800)) {
     uint32_t t = (a - s_bg3_base) >> 3;
@@ -411,21 +412,29 @@ static bool MathOnLine(const LineRegs *l, const SnesPpu *p) {
 
 // ---- the squash ----
 // GBA line g shows SNES row s_rowmap[g]; s_linemap[r] is the first GBA line
-// showing row r or a later one (for sprites).
-static uint8_t s_rowmap[kGbaLines], s_linemap[kSnesLines];
+// showing row r or a later one (for sprites), negative above the first.
+static uint8_t s_rowmap[kGbaLines];
+static int16_t s_linemap[kSnesLines];
 
-ROM_CODE static void BuildSquashMap(int vofs3, int vofs1) {
-  static int last3 = -1, last1 = -1;
-  if (vofs3 == last3 && vofs1 == last1) return;
-  last3 = vofs3, last1 = vofs1;
+ROM_CODE static void BuildSquashMap(int mode, int vofs3, int vofs1) {
+  static int last_mode = -1, last3 = -1, last1 = -1;
+  if (mode == last_mode && vofs3 == last3 && vofs1 == last1) return;
+  last_mode = mode, last3 = vofs3, last1 = vofs1;
   // Keep the rows that aren't the first or last of a tile row of the layer
   // with the text: the font's glyphs have their fill in rows 1-6 and their
-  // outlines in 0 and 7. BG3 has the HUD (rows 0-31), BG1 the menus below.
-  // That leaves 168 of 224; the first and last 4 of those go too.
+  // outlines in 0 and 7. BG3 has the HUD (rows 0-31), BG2 the menus below.
+  // The full squash keeps 168 of 224 and drops the first and last 4 more;
+  // the title's (rows 32 on, only each tile row's last row dropped) keeps
+  // 168 of 192 and drops 4 and 4 too.
+  int first = mode == kSquashTitle ? 32 : 0;
   int kept = 0, g = 0;
   for (int r = 0; r < kSnesLines; r++) {
+    if (r < first) {
+      s_linemap[r] = -1 - (first - 1 - r);
+      continue;
+    }
     int phase = ((r < 32 ? vofs3 : vofs1) + r + 1) & 7;
-    bool keep = phase != 0 && phase != 7;
+    bool keep = mode == kSquashTitle ? phase != 7 : (phase != 0 && phase != 7);
     if (keep && kept++ >= 4 && g < kGbaLines) s_rowmap[g++] = r;
     s_linemap[r] = g < kGbaLines ? g : kGbaLines;
   }
@@ -464,7 +473,7 @@ static void BuildOam(uint16_t *out, const ViewMap *vm, const uint8_t *obj_prio) 
     // Which region of the view it falls in, by its top line.
     int gy = y - vm->offset;
     if (vm->squash)
-      gy = y < 0 ? y - s_rowmap[0] : y >= kSnesLines ? kGbaLines : s_linemap[y];
+      gy = y < 0 ? y + s_linemap[0] : y >= kSnesLines ? kGbaLines : s_linemap[y];
     else if (vm->split && !vm->hud_overlay && y < vm->split + vm->top_offset)
       gy = y - vm->top_offset;
     int gx = x - vm->xoffset;
@@ -504,7 +513,7 @@ void RenderBuildFrame(const ViewMap *vm) {
   fr->blank = (p->inidisp & 0x80) != 0;
   fr->squash = vm->squash;
   if (vm->squash)
-    BuildSquashMap(g_line_states[g_line_state[0]].vofs[2],
+    BuildSquashMap(vm->squash, g_line_states[g_line_state[0]].vofs[2],
                    g_line_states[g_line_state[kSnesLines - 1]].vofs[1]);
   uint8_t tm = g_line_states[g_line_state[0]].tm, ts = g_line_states[g_line_state[0]].ts;
   bool sub_add = (p->cgwsel & 2) && (p->cgadsub & 0x20) && !(p->cgadsub & 0x1f);

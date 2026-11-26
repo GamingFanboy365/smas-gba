@@ -18,6 +18,8 @@
 //           starts; needs -f.
 //   -K      a script for the GBA frames before the game starts (the game
 //           select), by GBA frame; with -f, -k then starts with the game.
+//   -S      keeps the cartridge's SRAM in a file next to it (CART.sav),
+//           loaded at the start and written at the end.
 //   -p      FROM-TO: profiles those frames by stepping the CPU, and writes
 //           "address cycles" lines to DIR/profile.txt (tools/profile.py
 //           sums them by function).
@@ -180,6 +182,7 @@ int main(int argc, char **argv) {
   int ndumps = 0;
   int prof_from = -1, prof_to = -1;
   uint32_t frame_addr = 0, ram_addr = 0;
+  bool keep_save = false;
   struct { int frame; char *spec; bool done; } pokes[16];
   int npokes = 0;
   for (int i = 2; i < argc; i++) {
@@ -191,6 +194,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(a, "-o")) outdir = v, i++;
     else if (!strcmp(a, "-a")) audio_path = v, i++;
     else if (!strcmp(a, "-q")) g_quiet = true;
+    else if (!strcmp(a, "-S")) keep_save = true;
     else if (!strcmp(a, "-p")) { sscanf(v, "%d-%d", &prof_from, &prof_to); i++; }
     else if (!strcmp(a, "-f")) frame_addr = strtoul(v, NULL, 16), i++;
     else if (!strcmp(a, "-r")) ram_addr = strtoul(v, NULL, 16), i++;
@@ -234,6 +238,7 @@ int main(int argc, char **argv) {
   uint32_t *pixels = calloc(w * h, 4);
   core->setVideoBuffer(core, (mColor *)pixels, w);
   if (!mCoreLoadFile(core, argv[1])) { fprintf(stderr, "can't load %s\n", argv[1]); return 1; }
+  if (keep_save) mCoreAutoloadSave(core);
   core->setAudioBufferSize(core, 2048);
   core->reset(core);
 

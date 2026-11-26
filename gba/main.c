@@ -19,6 +19,7 @@ enum {
   kRam_GameMode = 0x770,
   kRam_GameModeTask = 0x772,
   kRam_PlayerSize = 0x754,  // 0 big, 1 small
+  kRam_PauseMenu = 0x776,   // display_pause_menu_flag (both games)
 };
 
 // The GBA's buttons as the SNES joypad word (B Y Sel Start U D L R A X L R).
@@ -57,11 +58,11 @@ static int s_cam = kMaxOffset;
 static void UpdateView(ViewMap *vm) {
   vm->xoffset = 8;
   vm->hud_overlay = false;
-  vm->squash = false;
+  vm->squash = kSquashNone;
   uint8_t mode = RAM8(kRam_GameMode), task = RAM8(kRam_GameModeTask);
   if (mode == 0) {
-    // The title: all of it, squashed.
-    vm->squash = true;
+    // The title: all but the HUD, squashed a little.
+    vm->squash = kSquashTitle;
     return;
   }
   if ((mode == 1 && task >= 3) || mode == 2) {
@@ -73,6 +74,8 @@ static void UpdateView(ViewMap *vm) {
     int head = y + (RAM8(kRam_PlayerSize) ? 16 : 0);
     int target = kMaxOffset;
     if (head - target < kHeadroom) target = head - kHeadroom;
+    // The pause menu's box (SNES rows 64-135) clear of the HUD.
+    if (RAM8(kRam_PauseMenu) & 1) target = 40;
     // Below the overlaid HUD the level shows rows from offset + 16; above
     // row 32, BG3 is the SNES's own HUD, which would show twice.
     if (target < 32 - kOverlayLines) target = 32 - kOverlayLines;
@@ -83,7 +86,7 @@ static void UpdateView(ViewMap *vm) {
     return;
   }
   // The intro card and the other screens between levels: squashed.
-  vm->squash = true;
+  vm->squash = kSquashFull;
   s_cam = kMaxOffset;
 }
 

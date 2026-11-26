@@ -13,10 +13,15 @@ typedef struct ViewMap {
   int top_offset;
   int offset;
   bool hud_overlay;
-  // Squashed instead: the whole 224 rows in 160 lines, each 8-row tile row of
-  // BG3 (the text) losing its first and last row; split and offsets unused.
-  bool squash;
+  // Squashed instead (split and offsets unused):
+  //   kSquashFull: the whole 224 rows in 160 lines, each 8-row tile row of
+  //     the text layer losing its first and last row (screens between levels);
+  //   kSquashTitle: rows 32-223, without the HUD, each tile row losing only
+  //     its last row (the title).
+  uint8_t squash;
 } ViewMap;
+
+enum { kSquashNone, kSquashFull, kSquashTitle };
 
 void RenderInit(void);
 // Turns the SNES state the frame left into the GBA's next picture, in
