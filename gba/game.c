@@ -29,6 +29,8 @@ const GameDef kGames[2] = {
 const GameDef *g_game;
 // Game frames run so far; tools/mgba/smrun's -f follows it.
 volatile uint32_t g_game_frame;
+// The game frame whose picture was last presented; smrun's -F follows it.
+volatile uint32_t g_shown_frame;
 
 EWRAM_BSS static uint8_t s_sram[kSramSize];
 static bool s_need_reset;

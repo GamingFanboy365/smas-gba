@@ -22,3 +22,4 @@ void GameStart(const GameDef *game);
 void GameRunFrame(uint16_t joy1);
 // Writes save data that changed to the GBA's SRAM, a slice a call.
 void GameSyncSram(bool all);
+extern volatile uint32_t g_game_frame, g_shown_frame;

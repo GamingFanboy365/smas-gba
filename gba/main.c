@@ -55,17 +55,32 @@ enum {
 };
 static int s_cam = kMaxOffset;
 
+// The kind of view: the title's, a level's, or the screens' between levels.
+// It changes only while the screen is dark (or, should it never be, after
+// two thirds of a second): a level fading out after a death must not be
+// squashed on the way.
+enum { kViewTitle, kViewLevel, kViewBetween };
+static uint8_t s_view_kind = kViewTitle, s_view_wait;
+
 static void UpdateView(ViewMap *vm) {
   vm->xoffset = 8;
   vm->hud_overlay = false;
   vm->squash = kSquashNone;
   uint8_t mode = RAM8(kRam_GameMode), task = RAM8(kRam_GameModeTask);
-  if (mode == 0) {
+  int want = mode == 0 ? kViewTitle
+           : ((mode == 1 && task >= 3) || mode == 2) ? kViewLevel : kViewBetween;
+  if (want != s_view_kind) {
+    uint8_t inidisp = g_snes->ppu.inidisp;
+    if ((inidisp & 0x80) || !(inidisp & 0x0f) || ++s_view_wait > 40)
+      s_view_kind = want;
+  }
+  if (want == s_view_kind) s_view_wait = 0;
+  if (s_view_kind == kViewTitle) {
     // The title: all but the HUD, squashed a little.
     vm->squash = kSquashTitle;
     return;
   }
-  if ((mode == 1 && task >= 3) || mode == 2) {
+  if (s_view_kind == kViewLevel) {
     vm->split = kOverlayLines;
     vm->top_offset = kOverlayTop;
     vm->hud_overlay = true;
@@ -129,6 +144,7 @@ static void RunGame(void) {
     s_last_present_vblank = g_vblank_count;
     uint32_t t3 = CycleCount();
     RenderPresent();
+    g_shown_frame = g_game_frame;
     uint32_t t4 = CycleCount();
     GameSyncSram(false);
     t_game += t1 - t0, t_build += t2 - t1, t_present += t4 - t3;
@@ -163,6 +179,7 @@ int main(void) {
     RenderInit();
     GameStart(&kGames[choice]);
     s_cam = kMaxOffset;
+    s_view_kind = kViewTitle;
     RunGame();
   }
 }

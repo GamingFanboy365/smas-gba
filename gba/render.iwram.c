@@ -73,6 +73,7 @@ typedef struct FrameRegs {
   bool blank;
   bool tint;              // the per-line color is the tint layer's, not the backdrop's
   uint8_t squash;
+  uint8_t pal_bright;     // the brightness the palettes are to be at
 } FrameRegs;
 static FrameRegs s_regs[2];
 // The frame on screen, for RenderVBlank: its line table (NULL: none), where
@@ -261,19 +262,33 @@ __attribute__((noinline)) static void ConvertDirtyVram(void) {
   }
 }
 
+// The brightness the GBA's palettes are converted at: 15 but while a tinted
+// screen fades (see RenderBuildFrame), when the colors themselves are dimmed.
+static uint8_t s_pal_bright = 15;
+
+// A color at brightness b of 15, as INIDISP dims it.
+static uint16_t Dim(uint16_t c, int b) {
+  if (b >= 15) return c;
+  uint32_t k = b * 273;  // b / 15 in 12 bits
+  uint32_t r = ((c & 31) * k + 2048) >> 12, g = (((c >> 5) & 31) * k + 2048) >> 12,
+           bl = (((c >> 10) & 31) * k + 2048) >> 12;
+  return r | g << 5 | bl << 10;
+}
+
 ROM_CODE static void ConvertPalettes(void) {
   uint16_t d = g_cgram_dirty;
   g_cgram_dirty = 0;
+  int b = s_pal_bright;
   for (int p = 0; p < 16; p++) {
     if (!(d & (1 << p))) continue;
     const uint16_t *src = &g_snes_cgram[p * 16];
     volatile uint16_t *dst = (p < 8) ? PAL_BG + p * 16 : PAL_OBJ + (p - 8) * 16;
-    for (int i = (p == 0); i < 16; i++) dst[i] = src[i];
+    for (int i = (p == 0); i < 16; i++) dst[i] = Dim(src[i], b);
     if (p < 2) {
       // BG3's 2bpp palettes: CGRAM 4q..4q+3 are GBA palette 8 + q.
       for (int q = p * 4; q < p * 4 + 4; q++)
         for (int i = 1; i < 4; i++)
-          PAL_BG[(8 + q) * 16 + i] = g_snes_cgram[q * 4 + i];
+          PAL_BG[(8 + q) * 16 + i] = Dim(g_snes_cgram[q * 4 + i], b);
     }
   }
 }
@@ -669,7 +684,7 @@ void RenderBuildFrame(const ViewMap *vm) {
   // color, or black where math is off, blended with EVA = EVB = 16: the
   // GBA's sum, clamped at 31, is the SNES's. BG3, if not in the math, goes
   // above it (the HUD); the rest is planned below it, one level down.
-  bool tint = !(p->cgwsel & 2) && (math & 0x13) && !(math & 0xc4) && bright == 15;
+  bool tint = !(p->cgwsel & 2) && (math & 0x13) && !(math & 0xc4);
   LayerPlan lp;
   int k0 = 0;
   if (tint) {
@@ -681,6 +696,7 @@ void RenderBuildFrame(const ViewMap *vm) {
     PlanLayers(&lp, tm, sub_mask, (p->bgmode & 8) != 0, obj_used, 4, vm->hud_overlay);
   }
   fr->tint = tint;
+  fr->pal_bright = tint ? bright : 15;
 
   uint16_t dispcnt = DCNT_MODE0 | DCNT_OBJ_2D | DCNT_OBJ;
   uint8_t mosaic_layers = p->mosaic & 0xf;
@@ -814,7 +830,7 @@ void RenderBuildFrame(const ViewMap *vm) {
   if (!(g_line_changed & (kLineChanged_Fixed | kLineChanged_Window))) {
     const LineRegs *lr = &g_line_states[0];
     if (tint)
-      bd = MathOnLine(lr, p) ? lr->fixed_color : 0;
+      bd = MathOnLine(lr, p) ? Dim(lr->fixed_color, bright) : 0;
     else if (bd_math)
       bd = AddColors(cg0, lr->fixed_color, half, subtract);
     if (lt->backdrop[0] != bd || lt->backdrop[kGbaLines] != bd || s_bd_varies[b]) {
@@ -834,7 +850,7 @@ void RenderBuildFrame(const ViewMap *vm) {
           last_st = st;
           const LineRegs *lr = &g_line_states[st];
           if (tint)
-            bd = MathOnLine(lr, p) ? lr->fixed_color : 0;
+            bd = MathOnLine(lr, p) ? Dim(lr->fixed_color, bright) : 0;
           else if (bd_math)
             bd = AddColors(cg0, lr->fixed_color, half, subtract);
           if (g == 0) bd0 = bd;
@@ -868,6 +884,10 @@ ROM_CODE void RenderPresent(void) {
       g_vram_dirty[(a & 0x7fff) >> 9] |= 1u << ((a >> 4) & 31);
   }
   ConvertDirtyVram();
+  if (fr->pal_bright != s_pal_bright) {
+    s_pal_bright = fr->pal_bright;
+    g_cgram_dirty = 0xffff;
+  }
   ConvertPalettes();
 
   // If converting ran past the VBlank (a level's load), the registers wait
@@ -896,7 +916,7 @@ ROM_CODE void RenderPresent(void) {
   REG_MOSAIC = fr->mosaic;
 
   // The per-line color is the backdrop's, or with the tint, the tint's.
-  if (fr->tint) PAL_BG[0] = g_snes_cgram[0];
+  if (fr->tint) PAL_BG[0] = Dim(g_snes_cgram[0], s_pal_bright);
   s_front_color = fr->tint ? &PAL_BG[15 * 16 + 15] : &PAL_BG[0];
   s_front_per_line = fr->backdrop_per_line;
   s_front = lt;

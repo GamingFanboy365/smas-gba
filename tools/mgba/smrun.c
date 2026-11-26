@@ -23,6 +23,10 @@
 //   -E      FROM-TO: a picture of every GBA frame in the range (GBA frame
 //           numbers, whatever -f says), to DIR/eNNNNNN.png: shows what
 //           the screen does while a game frame takes more than one.
+//   -F      ADDR (hex): the frame the game last presented (g_shown_frame).
+//           With it, shot N is the first GBA frame that shows game frame N,
+//           however long the game took over it (without, -f's counter is
+//           used, which is a frame out when the game runs slow).
 //   -p      FROM-TO: profiles those frames by stepping the CPU, and writes
 //           "address cycles" lines to DIR/profile.txt (tools/profile.py
 //           sums them by function).
@@ -184,7 +188,7 @@ int main(int argc, char **argv) {
   MemDump dumps[16];
   int ndumps = 0;
   int prof_from = -1, prof_to = -1, every_from = -1, every_to = -1;
-  uint32_t frame_addr = 0, ram_addr = 0;
+  uint32_t frame_addr = 0, ram_addr = 0, shown_addr = 0, prev_shown = 0;
   bool keep_save = false;
   struct { int frame; char *spec; bool done; } pokes[16];
   int npokes = 0;
@@ -201,6 +205,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(a, "-p")) { sscanf(v, "%d-%d", &prof_from, &prof_to); i++; }
     else if (!strcmp(a, "-E")) { sscanf(v, "%d-%d", &every_from, &every_to); i++; }
     else if (!strcmp(a, "-f")) frame_addr = strtoul(v, NULL, 16), i++;
+    else if (!strcmp(a, "-F")) shown_addr = strtoul(v, NULL, 16), i++;
     else if (!strcmp(a, "-r")) ram_addr = strtoul(v, NULL, 16), i++;
     else if (!strcmp(a, "-w") && npokes < 16) {
       pokes[npokes].frame = atoi(v);
@@ -307,7 +312,18 @@ int main(int argc, char **argv) {
       while ((n = mAudioBufferRead(ab, abuf, 4096)) > 0)
         fwrite(abuf, 4, n, af);
     }
-    if (frame_addr) {
+    if (shown_addr) {
+      // runFrame returns as VBlank starts: the frame just drawn shows the
+      // last frame presented, the next not being presented yet.
+      prev_shown = core->busRead32(core, shown_addr);
+      while (next_shot < shots.n && (uint32_t)shots.v[next_shot] + 1 <= prev_shown) {
+        if ((uint32_t)shots.v[next_shot] + 1 == prev_shown) {
+          snprintf(path, sizeof(path), "%s/g%06d.png", outdir, shots.v[next_shot]);
+          WritePng(path, pixels, w, h);
+        }
+        next_shot++;
+      }
+    } else if (frame_addr) {
       // Game frame N shows once game frame N + 1 has started.
       uint32_t gf = core->busRead32(core, frame_addr);
       while (next_shot < shots.n && (uint32_t)shots.v[next_shot] + 2 <= gf) {
