@@ -292,8 +292,11 @@ int main(int argc, char **argv) {
       snprintf(path, sizeof(path), "%s/g%06d.png", outdir, g_frame);
       WritePng(path, pixels, w, h);
     }
+    uint32_t gf_now = frame_addr ? core->busRead32(core, frame_addr) : 0;
     for (int d = 0; d < ndumps; d++) {
-      if (!InList(&dumps[d].frames, g_frame)) continue;
+      // With -f, dump frames are game frames, taken when its shot would be.
+      if (frame_addr ? !InList(&dumps[d].frames, (int)gf_now - 2) : !InList(&dumps[d].frames, g_frame))
+        continue;
       snprintf(path, sizeof(path), "%s/m%06d_%08x.bin", outdir, g_frame, dumps[d].addr);
       FILE *f = fopen(path, "wb");
       for (uint32_t i = 0; i < dumps[d].len; i++) fputc(core->rawRead8(core, dumps[d].addr + i, -1), f);

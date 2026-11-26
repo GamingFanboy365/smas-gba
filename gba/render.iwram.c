@@ -4,8 +4,10 @@
 // GBA BG VRAM layout (mode 0):
 //   0x0000-0x7fff  the SNES's BG1/BG2 4bpp tiles, tile n at GBA tile n.
 //                  GBA tile 1023 is kept transparent (see kBlankTile12).
-//   0x8000-0x9fff  the SNES's BG3 2bpp tiles 0-255, widened to 4bpp, using
-//                  GBA palettes 8-15. Tile 255 is kept transparent.
+//   0x8000-0x97ff  the SNES's BG3 2bpp tiles 0-189, widened to 4bpp, using
+//                  GBA palettes 8-15 (colors 0-3). Tile 190 is solid color
+//                  15, tile 191 transparent.
+//   0x9800-0x9fff  the tint layer's map: tile 190, palette 15, everywhere.
 //   0xa000-0xffff  12 screenblocks: for each SNES layer, its whole map
 //                  ("full") and a copy with only its priority tiles ("hi").
 // A SNES layer whose tiles of both priorities matter is shown as two GBA
@@ -30,7 +32,9 @@
 
 enum {
   kBlankTile12 = 1023,
-  kBlankTile3 = 255,
+  kSolidTile3 = 190,     // all color 15: the tint layer's tile
+  kBlankTile3 = 191,
+  kTintSb = 19,          // the tint layer's map, after BG3's 192 tiles
   kSbBase = 20,          // first screenblock of the maps
   kGbaLines = 160,
 };
@@ -66,6 +70,7 @@ typedef struct FrameRegs {
   uint16_t dispcnt, bgcnt[4], bldcnt, bldalpha, bldy, mosaic;
   bool backdrop_per_line;
   bool blank;
+  bool tint;              // the per-line color is the tint layer's, not the backdrop's
 } FrameRegs;
 static FrameRegs s_regs[2];
 EWRAM_BSS static uint16_t s_oam[2][512] __attribute__((aligned(4)));
@@ -103,7 +108,7 @@ static inline uint16_t MapEntry(uint16_t e, int layer) {
   if (layer == 2) {
     // BG3: 2bpp palettes are GBA palettes 8-15; its tiles 0-255 only.
     r |= 0x8000;
-    if ((e & 0x3ff) >= kBlankTile3) r = (r & ~0x3ff) | kBlankTile3;
+    if ((e & 0x3ff) >= kSolidTile3) r = (r & ~0x3ff) | kBlankTile3;
   } else if ((e & 0x3ff) == kBlankTile12) {
     r = (r & ~0x3ff) | kBlankTile12;
   }
@@ -144,7 +149,7 @@ static void ConvertChunk(uint32_t a) {
   if (InRange(a, s_bg3_base, 0x800)) {
     uint32_t t = (a - s_bg3_base) >> 3;
     for (int k = 0; k < 2; k++, t++)
-      if (t != kBlankTile3)
+      if (t < kSolidTile3)
         Convert2bpp((volatile uint32_t *)(VRAM + 0x4000 + t * 16), src + k * 8);
   }
   for (int n = 0; n < 2; n++) {
@@ -251,7 +256,7 @@ typedef struct LayerPlan {
 } LayerPlan;
 
 ROM_CODE static void PlanLayers(LayerPlan *lp, uint8_t main_mask, uint8_t sub_mask,
-                                bool bg3hi, uint8_t obj_prios_used) {
+                                bool bg3hi, uint8_t obj_prios_used, int max_bg) {
   const Plane *order = bg3hi ? kMode1Bg3Hi : kMode1;
   // Which planes show: a layer's hi plane if it has priority tiles, its low
   // plane always; sprite planes if some sprite uses them.
@@ -277,7 +282,7 @@ ROM_CODE static void PlanLayers(LayerPlan *lp, uint8_t main_mask, uint8_t sub_ma
   int nbg = 0;
   for (int i = 0; i < n; i++) nbg += planes[i].layer != kPlaneObj;
   static const uint8_t kMergeOrder[3] = { 2, 1, 0 };
-  for (int m = 0; m < 3 && nbg > 4; m++) {
+  for (int m = 0; m < 3 && nbg > max_bg; m++) {
     int layer = kMergeOrder[m], hi = -1, lo = -1;
     for (int i = 0; i < n; i++) {
       if (planes[i].layer != layer) continue;
@@ -298,7 +303,7 @@ ROM_CODE static void PlanLayers(LayerPlan *lp, uint8_t main_mask, uint8_t sub_ma
     if (pl.layer == kPlaneObj) {
       if (bg_at_level && level < 3) level++, bg_at_level = false;
       lp->obj_prio[pl.prio] = level;
-    } else if (lp->nbg < 4) {
+    } else if (lp->nbg < max_bg) {
       int k = lp->nbg++;
       lp->bg_layer[k] = pl.layer;
       lp->bg_hi[k] = false;
@@ -330,6 +335,38 @@ static inline uint16_t AddColors(uint16_t a, uint16_t b, bool half, bool sub) {
   if (r < 0) r = 0; if (g < 0) g = 0; if (bl < 0) bl = 0;
   if (r > 31) r = 31; if (g > 31) g = 31; if (bl > 31) bl = 31;
   return r | g << 5 | bl << 10;
+}
+
+// Whether a line is in the color window, taking a window to cover its line
+// when it spans at least half of it (the games' windows here are whole lines
+// or nothing).
+static bool ColorWindowCovers(const LineRegs *l, uint8_t wobjsel, uint8_t wobjlog) {
+  bool w[2], en[2];
+  for (int i = 0; i < 2; i++) {
+    int left = l->wh[i * 2], right = l->wh[i * 2 + 1];
+    en[i] = (wobjsel >> (5 + 2 * i)) & 1;
+    w[i] = right - left >= 128;
+    if ((wobjsel >> (4 + 2 * i)) & 1) w[i] = !w[i];
+  }
+  if (!en[0] && !en[1]) return false;
+  if (!en[1]) return w[0];
+  if (!en[0]) return w[1];
+  switch ((wobjlog >> 2) & 3) {
+  case 0: return w[0] || w[1];
+  case 1: return w[0] && w[1];
+  case 2: return w[0] != w[1];
+  default: return w[0] == w[1];
+  }
+}
+
+// Whether color math applies on a line, by CGWSEL's bits 4-5.
+static bool MathOnLine(const LineRegs *l, const SnesPpu *p) {
+  switch ((p->cgwsel >> 4) & 3) {
+  case 0: return true;
+  case 1: return ColorWindowCovers(l, p->wobjsel, p->wobjlog);
+  case 2: return !ColorWindowCovers(l, p->wobjsel, p->wobjlog);
+  default: return false;
+  }
 }
 
 // ---- sprites ----
@@ -386,6 +423,10 @@ void RenderInit(void) {
   // Transparent tiles.
   memset((void *)(VRAM + kBlankTile12 * 16), 0, 32);
   memset((void *)(VRAM + 0x4000 + kBlankTile3 * 16), 0, 32);
+  for (int i = 0; i < 8; i++)
+    ((volatile uint32_t *)(VRAM + 0x4000 + kSolidTile3 * 16))[i] = 0xffffffff;
+  for (int i = 0; i < 0x400; i++)
+    VRAM[kTintSb * 0x400 + i] = 0xf000 | kSolidTile3;
   s_layout_valid = false;
 }
 
@@ -401,28 +442,72 @@ void RenderBuildFrame(const ViewMap *vm) {
   uint8_t sub_mask = sub_add ? ts : 0;
 
   uint8_t obj_used = ObjPriosUsed();
+  int bright = p->inidisp & 0xf;
+  uint8_t math = p->cgadsub;
+
+  // The fixed color added to the main screen's layers (the water levels'
+  // tint): a layer of solid color on top, its color per line the fixed
+  // color, or black where math is off, blended with EVA = EVB = 16: the
+  // GBA's sum, clamped at 31, is the SNES's. BG3, if not in the math, goes
+  // above it (the HUD); the rest is planned below it, one level down.
+  bool tint = !(p->cgwsel & 2) && (math & 0x13) && !(math & 0xc4) && bright == 15;
   LayerPlan lp;
-  PlanLayers(&lp, tm, sub_mask, (p->bgmode & 8) != 0, obj_used);
+  int k0 = 0;
+  if (tint) {
+    k0 = (tm & 0x04) ? 2 : 1;
+    PlanLayers(&lp, tm & ~0x04, 0, (p->bgmode & 8) != 0, obj_used, 4 - k0);
+  }
+  if (!tint) {
+    k0 = 0;
+    PlanLayers(&lp, tm, sub_mask, (p->bgmode & 8) != 0, obj_used, 4);
+  }
+  fr->tint = tint;
 
   uint16_t dispcnt = DCNT_MODE0 | DCNT_OBJ_2D | DCNT_OBJ;
   uint8_t mosaic_layers = p->mosaic & 0xf;
+  uint8_t layer_of[4] = { 0, 0, 0, 0 };
+  int tint_bg = -1;
+  if (tint) {
+    if (tm & 0x04) {
+      int size = s_map_size[2] == 3 ? 1 : s_map_size[2];
+      fr->bgcnt[0] = 0 | 2 << 2 | ((mosaic_layers >> 2) & 1) << 6 | SbFull(2) << 8 | size << 14;
+      layer_of[0] = 2;
+      dispcnt |= DCNT_BG0;
+    }
+    tint_bg = k0 - 1;
+    fr->bgcnt[tint_bg] = 0 | 2 << 2 | kTintSb << 8;
+    dispcnt |= DCNT_BG0 << tint_bg;
+    layer_of[tint_bg] = 0;
+    for (int p2 = 0; p2 < 4; p2++)
+      if (lp.obj_prio[p2] < 3) lp.obj_prio[p2]++;
+  }
   for (int k = 0; k < lp.nbg; k++) {
     int layer = lp.bg_layer[k];
     int sb = lp.bg_hi[k] ? SbHi(layer) : SbFull(layer);
     int size = s_map_size[layer] == 3 ? 1 : s_map_size[layer];
-    fr->bgcnt[k] = lp.bg_prio[k] | (layer == 2 ? 2 : 0) << 2 |
-                   ((mosaic_layers >> layer) & 1) << 6 | sb << 8 | size << 14;
-    dispcnt |= DCNT_BG0 << k;
+    int prio = lp.bg_prio[k] + (tint ? 1 : 0);
+    if (prio > 3) prio = 3;
+    fr->bgcnt[k + k0] = prio | (layer == 2 ? 2 : 0) << 2 |
+                        ((mosaic_layers >> layer) & 1) << 6 | sb << 8 | size << 14;
+    layer_of[k + k0] = layer;
+    dispcnt |= DCNT_BG0 << (k + k0);
   }
   if (!(tm & 0x10)) dispcnt &= ~DCNT_OBJ;
   fr->dispcnt = dispcnt;
   int msz = p->mosaic >> 4;
   fr->mosaic = msz | msz << 4 | msz << 8 | msz << 12;
 
-  // Brightness: the GBA darkens toward black with BLDY.
-  int bright = p->inidisp & 0xf;
   fr->bldcnt = 0, fr->bldalpha = 0, fr->bldy = 0;
-  if (bright < 15) {
+  if (tint) {
+    uint16_t second = 0;
+    for (int k = k0; k < k0 + lp.nbg; k++)
+      if (math & (1 << layer_of[k])) second |= 1 << (8 + k);
+    if (math & 0x10) second |= 1 << 12;
+    if (math & 0x20) second |= 1 << 13;
+    fr->bldcnt = (1 << tint_bg) | 1 << 6 | second;
+    fr->bldalpha = 16 | 16 << 8;
+  } else if (bright < 15) {
+    // Brightness: the GBA darkens toward black with BLDY.
     fr->bldcnt = 0x3f | 3 << 6;
     fr->bldy = (16 * (15 - bright) + 7) / 15;
   }
@@ -432,8 +517,6 @@ void RenderBuildFrame(const ViewMap *vm) {
   bool half = (p->cgadsub & 0x40) != 0, subtract = (p->cgadsub & 0x80) != 0;
   uint16_t cg0 = g_snes_cgram[0];
   bool per_line_bd = false;
-  uint8_t layer_of[4];
-  for (int k = 0; k < 4; k++) layer_of[k] = k < lp.nbg ? lp.bg_layer[k] : 0;
   uint32_t last_fixed = 0xffffffff;
   uint16_t bd = cg0;
   int last_key = -1;
@@ -447,7 +530,7 @@ void RenderBuildFrame(const ViewMap *vm) {
     uint32_t *s = (uint32_t *)lt->scroll[g];
     int st = g_line_state[r];
     // Lines whose state and region are the previous line's get its entry.
-    int key = top ? -2 : st;
+    int key = top ? -2 - g : st;  // the HUD's lines show other rows: never
     if (key == last_key && g != kGbaLines) {
       const uint32_t *prev = (const uint32_t *)lt->scroll[g - 1];
       s[0] = prev[0], s[1] = prev[1], s[2] = prev[2], s[3] = prev[3];
@@ -468,7 +551,9 @@ void RenderBuildFrame(const ViewMap *vm) {
       uint32_t dv = 1 + (layer == 2 ? rh : r) - gl;
       s[k] = ((l->hofs[layer] + vm->xoffset) & 0xffff) | (uint32_t)(l->vofs[layer] + dv) << 16;
     }
-    if (bd_math && lr->fixed_color != last_fixed) {
+    if (tint) {
+      bd = MathOnLine(lr, p) ? lr->fixed_color : 0;
+    } else if (bd_math && lr->fixed_color != last_fixed) {
       last_fixed = lr->fixed_color;
       bd = AddColors(cg0, lr->fixed_color, half, subtract);
     }
@@ -520,10 +605,13 @@ void RenderPresent(void) {
   REG_DMA_SAD(0) = (uint32_t)lt->scroll[1];
   REG_DMA_DAD(0) = 0x04000010;
   REG_DMA_CNT(0) = 4 | DMA_32 | DMA_DST_RELOAD | DMA_REPEAT | DMA_AT_HBLANK | DMA_ENABLE;
-  PAL_BG[0] = lt->backdrop[0];
+  // The per-line color is the backdrop's, or with the tint, the tint's.
+  volatile uint16_t *line_color = fr->tint ? &PAL_BG[15 * 16 + 15] : &PAL_BG[0];
+  if (fr->tint) PAL_BG[0] = g_snes_cgram[0];
+  *line_color = lt->backdrop[0];
   if (fr->backdrop_per_line) {
     REG_DMA_SAD(3) = (uint32_t)&lt->backdrop[1];
-    REG_DMA_DAD(3) = 0x05000000;
+    REG_DMA_DAD(3) = (uint32_t)line_color;
     REG_DMA_CNT(3) = 1 | DMA_16 | DMA_DST_FIXED | DMA_REPEAT | DMA_AT_HBLANK | DMA_ENABLE;
   }
 }

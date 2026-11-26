@@ -72,7 +72,9 @@ static void UpdateView(ViewMap *vm) {
     int head = y + (RAM8(kRam_PlayerSize) ? 16 : 0);
     int target = kMaxOffset;
     if (head - target < kHeadroom) target = head - kHeadroom;
-    if (target < 0) target = 0;
+    // Below the overlaid HUD the level shows rows from offset + 16; above
+    // row 32, BG3 is the SNES's own HUD, which would show twice.
+    if (target < 32 - kOverlayLines) target = 32 - kOverlayLines;
     // Ease toward it: up quickly (Mario can move 5 lines a frame), down slowly.
     if (target < s_cam) s_cam -= (s_cam - target > 6) ? 6 : s_cam - target;
     else if (target > s_cam) s_cam += (target - s_cam > 3) ? 3 : target - s_cam;
