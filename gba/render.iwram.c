@@ -725,6 +725,27 @@ ROM_CODE static void BuildSegs(const ViewMap *vm) {
   last = *vm;
   last_rowmap = s_rowmap_version;
   if (++s_segs_version >= 0x7fff) s_segs_version = 1;
+  // Not squashed: one run of lines, or two with a split, made directly (the
+  // camera moves most frames in a water level).
+  int top_layers = vm->top_offset, rest = vm->offset;
+  if (!vm->squash && rest >= 0 && rest + kGbaLines <= kSnesLines && top_layers >= 0 &&
+      top_layers + vm->split <= kSnesLines) {
+    for (int which = 0; which < 2; which++) {
+      RowSeg *seg = s_segs[which];
+      int n = 0;
+      // Above the split: the pinned strip for every layer, or with the HUD
+      // overlaid, BG3's HUD rows alone.
+      bool top_moved = vm->split && (!vm->hud_overlay || which);
+      if (vm->split && top_moved && top_layers != rest) {
+        seg[n++] = (RowSeg){ 0, (uint8_t)vm->split, (int16_t)top_layers };
+        seg[n++] = (RowSeg){ (uint8_t)vm->split, kGbaLines, (int16_t)rest };
+      } else {
+        seg[n++] = (RowSeg){ 0, kGbaLines, (int16_t)rest };
+      }
+      s_nsegs[which] = n;
+    }
+    return;
+  }
   for (int which = 0; which < 2; which++) {
     RowSeg *seg = s_segs[which];
     int n = 0;
