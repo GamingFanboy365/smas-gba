@@ -1,0 +1,22 @@
+// Interrupts: IrqDispatch is called by irq_entry (crt0.S) in system mode
+// with interrupts off.
+#include "gba_hw.h"
+#include "audio.h"
+#include "irq.h"
+
+volatile uint32_t g_vblank_count;
+
+void IrqDispatch(uint32_t flags) {
+  if (flags & IRQ_VBLANK) {
+    g_vblank_count++;
+    AudioVBlank();
+  }
+}
+
+void IrqInit(void) {
+  REG_IME = 0;
+  REG_DISPSTAT = DSTAT_VBL_IRQ;
+  REG_IE = IRQ_VBLANK;
+  REG_IF = 0xffff;
+  REG_IME = 1;
+}
