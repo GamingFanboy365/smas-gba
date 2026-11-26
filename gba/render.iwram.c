@@ -71,6 +71,7 @@ typedef struct FrameRegs {
   bool backdrop_per_line;
   bool blank;
   bool tint;              // the per-line color is the tint layer's, not the backdrop's
+  bool squash;
 } FrameRegs;
 static FrameRegs s_regs[2];
 EWRAM_BSS static uint16_t s_oam[2][512] __attribute__((aligned(4)));
@@ -87,20 +88,45 @@ ROM_CODE static void InitSpread(void) {
   }
 }
 
-static void Convert4bpp(volatile uint32_t *dst, const uint16_t *src) {
-  const uint32_t *sp = s_spread;
-  for (int y = 0; y < 8; y++) {
-    uint32_t lo = src[y], hi = src[y + 8];
-    dst[y] = sp[lo & 0xff] | sp[lo >> 8] << 1 | sp[hi & 0xff] << 2 | sp[hi >> 8] << 3;
-  }
+// On squashed screens (the title, the intro card) rows 0 and 7 of the text
+// layer's tiles aren't shown. BG1/BG2's tiles are converted with them merged
+// into rows 1 and 6, an edge row's pixel winning where it has one, so the
+// title menu's font (white letters over white clouds) keeps its outlines.
+// BG3's font (the HUD, white over the sky) reads better left alone.
+static bool s_tiles_squashed;
+
+static inline uint32_t MergeRows(uint32_t edge, uint32_t inner) {
+  uint32_t m = (edge | edge >> 1 | edge >> 2 | edge >> 3) & 0x11111111;
+  m *= 0xf;
+  return (edge & m) | (inner & ~m);
 }
 
-static void Convert2bpp(volatile uint32_t *dst, const uint16_t *src) {
+static void Convert4bpp(volatile uint32_t *dst, const uint16_t *src, bool merge) {
   const uint32_t *sp = s_spread;
+  uint32_t rows[8];
+  for (int y = 0; y < 8; y++) {
+    uint32_t lo = src[y], hi = src[y + 8];
+    rows[y] = sp[lo & 0xff] | sp[lo >> 8] << 1 | sp[hi & 0xff] << 2 | sp[hi >> 8] << 3;
+  }
+  if (merge) {
+    rows[1] = MergeRows(rows[0], rows[1]);
+    rows[6] = MergeRows(rows[7], rows[6]);
+  }
+  for (int y = 0; y < 8; y++) dst[y] = rows[y];
+}
+
+static void Convert2bpp(volatile uint32_t *dst, const uint16_t *src, bool merge) {
+  const uint32_t *sp = s_spread;
+  uint32_t rows[8];
   for (int y = 0; y < 8; y++) {
     uint32_t lo = src[y];
-    dst[y] = sp[lo & 0xff] | sp[lo >> 8] << 1;
+    rows[y] = sp[lo & 0xff] | sp[lo >> 8] << 1;
   }
+  if (merge) {
+    rows[1] = MergeRows(rows[0], rows[1]);
+    rows[6] = MergeRows(rows[7], rows[6]);
+  }
+  for (int y = 0; y < 8; y++) dst[y] = rows[y];
 }
 
 static inline uint16_t MapEntry(uint16_t e, int layer) {
@@ -144,20 +170,20 @@ static void ConvertChunk(uint32_t a) {
   if (InRange(a, s_bg12_base, 0x4000)) {
     uint32_t t = (a - s_bg12_base) >> 4;
     if (t != kBlankTile12)
-      Convert4bpp((volatile uint32_t *)(VRAM + t * 16), src);
+      Convert4bpp((volatile uint32_t *)(VRAM + t * 16), src, s_tiles_squashed);
   }
   if (InRange(a, s_bg3_base, 0x800)) {
     uint32_t t = (a - s_bg3_base) >> 3;
     for (int k = 0; k < 2; k++, t++)
       if (t < kSolidTile3)
-        Convert2bpp((volatile uint32_t *)(VRAM + 0x4000 + t * 16), src + k * 8);
+        Convert2bpp((volatile uint32_t *)(VRAM + 0x4000 + t * 16), src + k * 8, false);
   }
   for (int n = 0; n < 2; n++) {
     if (InRange(a, s_obj_base[n], 0x1000)) {
       uint32_t t = ((a - s_obj_base[n]) >> 4) + n * 256;
       uint32_t g = (t >> 4) * 32 + (t & 15);
       volatile uint32_t *d = (volatile uint32_t *)(VRAM_OBJ + g * 16);
-      Convert4bpp(d, src);
+      Convert4bpp(d, src, false);
       for (int y = 0; y < 8; y++) d[y + 128] = d[y];  // the copy 16 tiles on
     }
   }
@@ -383,6 +409,29 @@ static bool MathOnLine(const LineRegs *l, const SnesPpu *p) {
   }
 }
 
+// ---- the squash ----
+// GBA line g shows SNES row s_rowmap[g]; s_linemap[r] is the first GBA line
+// showing row r or a later one (for sprites).
+static uint8_t s_rowmap[kGbaLines], s_linemap[kSnesLines];
+
+ROM_CODE static void BuildSquashMap(int vofs3, int vofs1) {
+  static int last3 = -1, last1 = -1;
+  if (vofs3 == last3 && vofs1 == last1) return;
+  last3 = vofs3, last1 = vofs1;
+  // Keep the rows that aren't the first or last of a tile row of the layer
+  // with the text: the font's glyphs have their fill in rows 1-6 and their
+  // outlines in 0 and 7. BG3 has the HUD (rows 0-31), BG1 the menus below.
+  // That leaves 168 of 224; the first and last 4 of those go too.
+  int kept = 0, g = 0;
+  for (int r = 0; r < kSnesLines; r++) {
+    int phase = ((r < 32 ? vofs3 : vofs1) + r + 1) & 7;
+    bool keep = phase != 0 && phase != 7;
+    if (keep && kept++ >= 4 && g < kGbaLines) s_rowmap[g++] = r;
+    s_linemap[r] = g < kGbaLines ? g : kGbaLines;
+  }
+  while (g < kGbaLines) s_rowmap[g] = s_rowmap[g - 1], g++;
+}
+
 // ---- sprites ----
 
 static const uint8_t kObjSizes[8][2] = {
@@ -414,7 +463,9 @@ static void BuildOam(uint16_t *out, const ViewMap *vm, const uint8_t *obj_prio) 
     if (y + h > 256) y -= 256;  // wraps to the top
     // Which region of the view it falls in, by its top line.
     int gy = y - vm->offset;
-    if (vm->split && !vm->hud_overlay && y < vm->split + vm->top_offset)
+    if (vm->squash)
+      gy = y < 0 ? y - s_rowmap[0] : y >= kSnesLines ? kGbaLines : s_linemap[y];
+    else if (vm->split && !vm->hud_overlay && y < vm->split + vm->top_offset)
       gy = y - vm->top_offset;
     int gx = x - vm->xoffset;
     uint16_t *d = &out[i * 4];
@@ -451,6 +502,10 @@ void RenderBuildFrame(const ViewMap *vm) {
   SnesPpu *p = &g_snes->ppu;
 
   fr->blank = (p->inidisp & 0x80) != 0;
+  fr->squash = vm->squash;
+  if (vm->squash)
+    BuildSquashMap(g_line_states[g_line_state[0]].vofs[2],
+                   g_line_states[g_line_state[kSnesLines - 1]].vofs[1]);
   uint8_t tm = g_line_states[g_line_state[0]].tm, ts = g_line_states[g_line_state[0]].ts;
   bool sub_add = (p->cgwsel & 2) && (p->cgadsub & 0x20) && !(p->cgadsub & 0x1f);
   uint8_t sub_mask = sub_add ? ts : 0;
@@ -538,13 +593,16 @@ void RenderBuildFrame(const ViewMap *vm) {
   for (int g = 0; g <= kGbaLines; g++) {
     int gl = g < kGbaLines ? g : kGbaLines - 1;
     bool top = vm->split && gl < vm->split;
-    int r = gl + ((top && !vm->hud_overlay) ? vm->top_offset : vm->offset);
+    int r = vm->squash ? s_rowmap[gl]
+                       : gl + ((top && !vm->hud_overlay) ? vm->top_offset : vm->offset);
     if (r < 0) r = 0;
     if (r >= kSnesLines) r = kSnesLines - 1;
     uint32_t *s = (uint32_t *)lt->scroll[g];
     int st = g_line_state[r];
     // Lines whose state and region are the previous line's get its entry.
-    int key = top ? -2 - g : st;  // the HUD's lines show other rows: never
+    // The HUD's lines show other rows: never. Otherwise, the same state at
+    // the same distance between row and line (squashed lines skip rows).
+    int key = top ? -2 - g : (st << 8) | ((r - gl) & 0xff);
     if (key == last_key && g != kGbaLines) {
       const uint32_t *prev = (const uint32_t *)lt->scroll[g - 1];
       s[0] = prev[0], s[1] = prev[1], s[2] = prev[2], s[3] = prev[3];
@@ -591,6 +649,12 @@ void RenderPresent(void) {
   REG_DMA_CNT(3) = 0;
 
   CheckLayout();
+  if (fr->squash != s_tiles_squashed) {
+    // Only BG1/BG2's tiles are converted differently.
+    s_tiles_squashed = fr->squash;
+    for (uint32_t a = s_bg12_base; a < (uint32_t)s_bg12_base + 0x4000; a += 16)
+      g_vram_dirty[(a & 0x7fff) >> 9] |= 1u << ((a >> 4) & 31);
+  }
   ConvertDirtyVram();
   ConvertPalettes();
   if (s_oam_ready[b]) {

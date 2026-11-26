@@ -57,11 +57,11 @@ static int s_cam = kMaxOffset;
 static void UpdateView(ViewMap *vm) {
   vm->xoffset = 8;
   vm->hud_overlay = false;
+  vm->squash = false;
   uint8_t mode = RAM8(kRam_GameMode), task = RAM8(kRam_GameModeTask);
   if (mode == 0) {
-    // The title: the logo and the menu, no HUD.
-    vm->split = 0;
-    vm->offset = 38;
+    // The title: all of it, squashed.
+    vm->squash = true;
     return;
   }
   if ((mode == 1 && task >= 3) || mode == 2) {
@@ -82,10 +82,8 @@ static void UpdateView(ViewMap *vm) {
     vm->offset = s_cam;
     return;
   }
-  // The intro card and the other screens between levels.
-  vm->split = kHudLines;
-  vm->top_offset = kHudTop;
-  vm->offset = 32;
+  // The intro card and the other screens between levels: squashed.
+  vm->squash = true;
   s_cam = kMaxOffset;
 }
 

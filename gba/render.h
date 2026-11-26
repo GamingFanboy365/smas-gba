@@ -13,6 +13,9 @@ typedef struct ViewMap {
   int top_offset;
   int offset;
   bool hud_overlay;
+  // Squashed instead: the whole 224 rows in 160 lines, each 8-row tile row of
+  // BG3 (the text) losing its first and last row; split and offsets unused.
+  bool squash;
 } ViewMap;
 
 void RenderInit(void);
