@@ -13,14 +13,16 @@ void IrqDispatch(uint32_t flags) {
     RenderVBlank();
     AudioVBlank();
   }
-  if (flags & IRQ_VCOUNT)
+  if (flags & IRQ_VCOUNT) {
+    RenderMidFrame();
     AudioMix();
+  }
 }
 
 void IrqInit(void) {
   REG_IME = 0;
-  // VCount 0, the top of the frame: the mixer (after VBlank, when the frame
-  // has been presented).
+  // VCount, near the top of the frame (RenderVBlank sets the line): the
+  // HUD layer's change of priority, then the mixer.
   REG_DISPSTAT = DSTAT_VBL_IRQ | DSTAT_VCT_IRQ | (0 << 8);
   REG_IE = IRQ_VBLANK | IRQ_VCOUNT;
   REG_IF = 0xffff;

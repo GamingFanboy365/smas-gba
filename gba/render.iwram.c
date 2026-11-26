@@ -74,6 +74,8 @@ typedef struct FrameRegs {
   bool tint;              // the per-line color is the tint layer's, not the backdrop's
   uint8_t squash;
   uint8_t pal_bright;     // the brightness the palettes are to be at
+  uint8_t split_line;     // BG0's priority changes above this line (0: no)
+  uint16_t bgcnt0_bottom; // to this
 } FrameRegs;
 static FrameRegs s_regs[2];
 // The frame on screen, for RenderVBlank: its line table (NULL: none), where
@@ -81,6 +83,8 @@ static FrameRegs s_regs[2];
 static const LineTable *volatile s_front;
 static volatile uint16_t *s_front_color;
 static bool s_front_per_line;
+static uint8_t s_front_split;            // see FrameRegs
+static uint16_t s_front_bgcnt0[2];       // above the split, from it on
 EWRAM_BSS static uint16_t s_oam[2][512] __attribute__((aligned(4)));
 static bool s_oam_ready[2];
 
@@ -691,7 +695,22 @@ void RenderBuildFrame(const ViewMap *vm) {
     k0 = (tm & 0x04) ? 2 : 1;
     PlanLayers(&lp, tm & ~0x04, 0, (p->bgmode & 8) != 0, obj_used, 4 - k0, false);
   }
-  if (!tint) {
+  // With the HUD overlaid on a level, BG3 is the HUD in the top lines and
+  // the level's own BG3 (clouds, scenery, behind everything) below them. If
+  // its priority tiles are all the HUD's (map rows 0-3), one GBA layer does
+  // both, in front of everything down to the split and at the back from
+  // there on (its priority changed in mid-picture, RenderMidFrame), which
+  // leaves three layers for BG1 and BG2: enough to show BG1's priority
+  // tiles apart, in front of the sprites, and the rest of it behind them.
+  bool hud_split = false;
+  if (!tint && vm->hud_overlay && ((tm | sub_mask) & 0x04)) {
+    int hud_tiles = s_prio_rows[2][0] + s_prio_rows[2][1] + s_prio_rows[2][2] + s_prio_rows[2][3];
+    hud_split = hud_tiles == s_prio_total[2];
+  }
+  if (hud_split) {
+    k0 = 1;
+    PlanLayers(&lp, tm & ~0x04, sub_mask & ~0x04, (p->bgmode & 8) != 0, obj_used, 3, false);
+  } else if (!tint) {
     k0 = 0;
     PlanLayers(&lp, tm, sub_mask, (p->bgmode & 8) != 0, obj_used, 4, vm->hud_overlay);
   }
@@ -715,6 +734,23 @@ void RenderBuildFrame(const ViewMap *vm) {
     layer_of[tint_bg] = 0;
     for (int p2 = 0; p2 < 4; p2++)
       if (lp.obj_prio[p2] < 3) lp.obj_prio[p2]++;
+  }
+  fr->split_line = 0;
+  if (hud_split) {
+    // Behind the others: a level further back than the last of them, when
+    // there is one (at the same level the lower-numbered BG, this one,
+    // would be in front).
+    int back = 0;
+    for (int k = 0; k < lp.nbg; k++)
+      if (lp.bg_prio[k] >= back) back = lp.bg_prio[k] + 1;
+    if (back > 3) back = 3;
+    int size = s_map_size[2] == 3 ? 1 : s_map_size[2];
+    uint16_t cnt = 2 << 2 | ((mosaic_layers >> 2) & 1) << 6 | SbFull(2) << 8 | size << 14;
+    fr->bgcnt[0] = cnt;            // priority 0 down to the split
+    fr->bgcnt0_bottom = cnt | back;
+    fr->split_line = vm->split;
+    layer_of[0] = 2;
+    dispcnt |= DCNT_BG0;
   }
   for (int k = 0; k < lp.nbg; k++) {
     int layer = lp.bg_layer[k];
@@ -919,6 +955,9 @@ ROM_CODE void RenderPresent(void) {
   if (fr->tint) PAL_BG[0] = Dim(g_snes_cgram[0], s_pal_bright);
   s_front_color = fr->tint ? &PAL_BG[15 * 16 + 15] : &PAL_BG[0];
   s_front_per_line = fr->backdrop_per_line;
+  s_front_split = fr->split_line;
+  s_front_bgcnt0[0] = fr->bgcnt[0];
+  s_front_bgcnt0[1] = fr->bgcnt0_bottom;
   s_front = lt;
   RenderVBlank();
 }
@@ -930,7 +969,12 @@ ROM_CODE void RenderPresent(void) {
 // alone, would read on past the tables' ends.
 void RenderVBlank(void) {
   const LineTable *lt = s_front;
+  // The VCount interrupt (the mixer's, and RenderMidFrame's) comes on the
+  // line before the split, or at the top without one.
+  int vline = (lt && s_front_split) ? s_front_split - 1 : 0;
+  REG_DISPSTAT = (REG_DISPSTAT & 0xff) | vline << 8;
   if (!lt) return;
+  if (s_front_split) REG_BGCNT(0) = s_front_bgcnt0[0];
   REG_DMA_CNT(0) = 0;
   volatile uint32_t *scroll_regs = (volatile uint32_t *)0x04000010;
   const uint32_t *line0 = (const uint32_t *)lt->scroll[0];
@@ -945,6 +989,15 @@ void RenderVBlank(void) {
     REG_DMA_DAD(3) = (uint32_t)s_front_color;
     REG_DMA_CNT(3) = 1 | DMA_16 | DMA_DST_FIXED | DMA_REPEAT | DMA_AT_HBLANK | DMA_ENABLE;
   }
+}
+
+// From the VCount interrupt, on the line before the split: once that line
+// is drawn (its HBlank), BG0 takes its priority for the lines from the
+// split on.
+void RenderMidFrame(void) {
+  if (!s_front || !s_front_split) return;
+  while (!(REG_DISPSTAT & 2)) {}
+  REG_BGCNT(0) = s_front_bgcnt0[1];
 }
 
 // Stops the per-line registers (leaving for the game select).

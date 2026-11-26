@@ -30,5 +30,7 @@ void RenderBuildFrame(const ViewMap *vm);
 void RenderPresent(void);
 // Restarts the picture's per-line registers; called from the VBlank interrupt.
 void RenderVBlank(void);
+// The mid-picture change of the HUD layer's priority; from the VCount interrupt.
+void RenderMidFrame(void);
 // Stops them (leaving a game).
 void RenderStop(void);
