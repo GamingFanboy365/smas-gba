@@ -1,9 +1,13 @@
 // The game select: Super Mario Bros. or The Lost Levels, drawn with SMB1's
-// own HUD font from the player's ROM (its BG3 tiles at $09B000).
+// own HUD font from the player's ROM (its BG3 tiles at $09B000), with the
+// cursor sound of All-Stars' own game select: sound 1 on the driver's port
+// 3, which is the same driver, samples and sound data as SMB1's (compared
+// byte for byte with the SPC700's RAM while the real menu runs).
 #include <string.h>
 #include "gba_hw.h"
 #include "platform.h"
 #include "irq.h"
+#include "audio.h"
 #include "menu.h"
 
 enum {
@@ -12,6 +16,7 @@ enum {
   kScreenBlock = 28,
   kBlank = 0x28, kDash = 0x24, kCoin = 0x27,
   kSramChoice = 0x4000,      // after the two games' 8 KB each
+  kCursorSound = 1,          // port 3
 };
 
 static const uint16_t kPalette[4] = {
@@ -83,7 +88,9 @@ int MenuRun(void) {
 
   REG_BGCNT(0) = kCharBlock << 2 | kScreenBlock << 8;
   REG_DISPCNT = DCNT_MODE0 | DCNT_BG0;
+  AudioStart(ASSET_TAG('S', 'P', 'C', '1'));
   bool drawn = false;
+  uint8_t sound = 0;
   uint16_t prev = 0x3ff;
   for (int frame = 0;; frame++) {
     // The choices, the chosen one bright, with the coin beside it.
@@ -96,17 +103,23 @@ int MenuRun(void) {
     }
     if (frame == 0) Fade(true);
     VBlankIntrWait();
+    // The sound driver's frame: a sound's number for a frame, then 0.
+    ApuWritePort(3, sound);
+    sound = 0;
+    AudioEndFrame();
     uint16_t keys = ~REG_KEYINPUT & 0x3ff, pressed = keys & ~prev;
     prev = keys;
     if (pressed & (KEY_UP | KEY_DOWN | KEY_SELECT)) {
       choice ^= 1;
       drawn = false;
+      sound = kCursorSound;
     }
     if (pressed & (KEY_A | KEY_START))
       break;
   }
   SRAM[kSramChoice] = choice ? 0xa1 : 0xa0;
   Fade(false);
+  AudioStop();
   REG_DISPCNT = DCNT_BLANK;
   return choice;
 }
