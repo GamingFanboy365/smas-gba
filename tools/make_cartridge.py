@@ -49,6 +49,35 @@ def derive_game_roms(smas):
     return roms
 
 
+# The SNES's controller setting ("B- JUMP" / "A- JUMP") goes: the GBA's A
+# is the SNES's B, and B its Y, as the setting's default has them. Its line
+# in the player select is blanked and the cursor's items cut from 3 to 2.
+# (SNES addresses: the item counts, then the line's two stripe images.)
+MENU_PATCHES = {
+    'SMB1': (0x089145, (0x088ea6, 0x088ecf)),
+    'SMBL': (0x089042, (0x088da6, 0x088dcf)),
+}
+
+
+def rom_offset(addr):
+    return ((addr >> 16) << 15) | (addr & 0x7fff)
+
+
+def patch_menu(tag, rom):
+    rom = bytearray(rom)
+    count_addr, stripes = MENU_PATCHES[tag]
+    p = rom_offset(count_addr)
+    if rom[p] != 3:
+        sys.exit('%s: unexpected menu item count at %06x' % (tag, count_addr))
+    rom[p] = 2
+    for addr in stripes:
+        p = rom_offset(addr) + 4         # after the stripe's 4-byte header
+        while rom[p] != 0xff:
+            rom[p], rom[p + 1] = 0x24, 0x00   # the blank the line pads with
+            p += 2
+    return bytes(rom)
+
+
 def build_assets(roms):
     import spc_image
     assets = []
@@ -91,7 +120,8 @@ def main():
     ap.add_argument('--engine', required=True, help='smas-engine.gba from the build')
     ap.add_argument('-o', '--out', required=True, help='the cartridge to write')
     ap.add_argument('--extract', metavar='DIR',
-                    help='also write smb1.sfc and smbll.sfc there (for tools/hostrun)')
+                    help='also write smb1.sfc and smbll.sfc there, as the cartridge has '
+                         'them (for tools/hostrun)')
     args = ap.parse_args()
 
     with open(args.rom, 'rb') as f:
@@ -102,6 +132,7 @@ def main():
         sys.exit('%s is not Super Mario All-Stars (USA): sha1 %s, expected %s'
                  % (args.rom, hashlib.sha1(smas).hexdigest(), SMAS_SHA1))
     roms = derive_game_roms(smas)
+    roms = {tag: patch_menu(tag, rom) for tag, rom in roms.items()}
     if args.extract:
         os.makedirs(args.extract, exist_ok=True)
         for tag, name in (('SMB1', 'smb1.sfc'), ('SMBL', 'smbll.sfc')):
