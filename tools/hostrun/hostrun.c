@@ -16,6 +16,8 @@
 //           "( ... )xN" repeats a group.
 //   SHOTS   frame numbers: "100,200,300-400/10" (PNG to DIR/fNNNNNN.png)
 //   DUMPS   frame numbers to dump state to DIR/fNNNNNN.dump (see WriteDump)
+//   -w      FRAME:ADDR=VAL[,ADDR=VAL...]: pokes the game's RAM (hex ADDR,
+//           hex VAL) before game frame FRAME; repeatable.
 //   -a      writes the sound (stereo s16, 32000 Hz) to a raw file.
 //   JOYLOG  a file with one hex SNES joypad word per frame (from the GBA
 //           build's trace); replaces SCRIPT.
@@ -209,6 +211,8 @@ int main(int argc, char **argv) {
   const char *script = "", *outdir = ".", *joylog = NULL, *audio_path = NULL;
   FrameList shots = { 0 }, dumps = { 0 };
   bool print_hash = false;
+  struct { int frame; char *spec; } pokes[16];
+  int npokes = 0;
   g_runmode = 1;  // RM_MINE
   for (int i = 2; i < argc; i++) {
     const char *a = argv[i], *v = (i + 1 < argc) ? argv[i + 1] : "";
@@ -219,6 +223,11 @@ int main(int argc, char **argv) {
     else if (!strcmp(a, "-o")) outdir = v, i++;
     else if (!strcmp(a, "-j")) joylog = v, i++;
     else if (!strcmp(a, "-a")) audio_path = v, i++;
+    else if (!strcmp(a, "-w") && npokes < 16) {
+      pokes[npokes].frame = atoi(v);
+      pokes[npokes].spec = strchr(v, ':') ? strchr(v, ':') + 1 : "";
+      npokes++, i++;
+    }
     else if (!strcmp(a, "-H")) print_hash = true;
     else if (!strcmp(a, "-m")) {
       g_runmode = !strcmp(v, "both") ? 0 : !strcmp(v, "theirs") ? 2 : 1;
@@ -258,6 +267,15 @@ int main(int argc, char **argv) {
       keys = g_steps[step].keys;
       if (--step_left <= 0 && ++step < g_nsteps)
         step_left = g_steps[step].frames;
+    }
+    for (int p = 0; p < npokes; p++) {
+      if (pokes[p].frame != frame) continue;
+      for (char *q = pokes[p].spec; *q;) {
+        unsigned addr = strtoul(q, &q, 16), val = 0;
+        if (*q == '=') val = strtoul(q + 1, &q, 16);
+        g_ram[addr & 0x1ffff] = val;
+        if (*q == ',') q++; else break;
+      }
     }
     RtlRunFrame(keys);
     if (af) {

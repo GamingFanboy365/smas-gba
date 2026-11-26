@@ -13,6 +13,9 @@
 //   -f      ADDR (hex): the game's frame counter (g_game_frame). With it, the
 //           script and the shots count game frames, as tools/hostrun does:
 //           shot N is the picture of game frame N.
+//   -w      FRAME:ADDR=VAL[,...] (hex ADDR and VAL): pokes the game's RAM
+//           (g_ram, at the address given with -r) before game frame FRAME
+//           starts; needs -f.
 //   -p      FROM-TO: profiles those frames by stepping the CPU, and writes
 //           "address cycles" lines to DIR/profile.txt (tools/profile.py
 //           sums them by function).
@@ -174,7 +177,9 @@ int main(int argc, char **argv) {
   MemDump dumps[16];
   int ndumps = 0;
   int prof_from = -1, prof_to = -1;
-  uint32_t frame_addr = 0;
+  uint32_t frame_addr = 0, ram_addr = 0;
+  struct { int frame; char *spec; bool done; } pokes[16];
+  int npokes = 0;
   for (int i = 2; i < argc; i++) {
     const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : "";
     if (!strcmp(a, "-n")) nframes = atoi(v), i++;
@@ -185,6 +190,13 @@ int main(int argc, char **argv) {
     else if (!strcmp(a, "-q")) g_quiet = true;
     else if (!strcmp(a, "-p")) { sscanf(v, "%d-%d", &prof_from, &prof_to); i++; }
     else if (!strcmp(a, "-f")) frame_addr = strtoul(v, NULL, 16), i++;
+    else if (!strcmp(a, "-r")) ram_addr = strtoul(v, NULL, 16), i++;
+    else if (!strcmp(a, "-w") && npokes < 16) {
+      pokes[npokes].frame = atoi(v);
+      pokes[npokes].spec = strchr(v, ':') ? strchr(v, ':') + 1 : "";
+      pokes[npokes].done = false;
+      npokes++, i++;
+    }
     else if (!strcmp(a, "-m") && ndumps < 16) {
       char *spec = strdup(v), *c1 = strchr(spec, ':'), *c2 = c1 ? strchr(c1 + 1, ':') : NULL;
       if (!c2) { fprintf(stderr, "bad -m %s\n", v); return 1; }
@@ -230,6 +242,16 @@ int main(int argc, char **argv) {
         if (step < g_nsteps && --left <= 0 && ++step < g_nsteps) left = g_steps[step].frames;
       }
       if (step < g_nsteps) keys = g_steps[step].keys;
+      for (int p = 0; p < npokes; p++) {
+        if (pokes[p].done || (uint32_t)pokes[p].frame > gf) continue;
+        pokes[p].done = true;
+        for (char *q = pokes[p].spec; *q;) {
+          unsigned addr = strtoul(q, &q, 16), val = 0;
+          if (*q == '=') val = strtoul(q + 1, &q, 16);
+          core->busWrite8(core, ram_addr + (addr & 0x1ffff), val);
+          if (*q == ',') q++; else break;
+        }
+      }
     } else if (step < g_nsteps) {
       keys = g_steps[step].keys;
       if (--left <= 0 && ++step < g_nsteps) left = g_steps[step].frames;
