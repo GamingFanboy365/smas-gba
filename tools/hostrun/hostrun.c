@@ -11,7 +11,8 @@
 //                    [-m mine|both|theirs] [-H] [-j JOYLOG]
 //   ROM     smb1.sfc or smbll.sfc (made by tools/make_cartridge.py --extract)
 //   SCRIPT  words "KEYS*N" (N frames, default 1): KEYS is '-' or keys joined
-//           by '+': up down left right a b x y l r start select.
+//           by '+': up down left right a b l r start select, named as on the
+//           GBA (a = SNES B, b = SNES Y), and x y for the SNES's A and X.
 //           "( ... )xN" repeats a group.
 //   SHOTS   frame numbers: "100,200,300-400/10" (PNG to DIR/fNNNNNN.png)
 //   DUMPS   frame numbers to dump state to DIR/fNNNNNN.dump (see WriteDump)
@@ -75,9 +76,11 @@ static void AddStep(uint16 keys, int frames) {
 }
 
 // Bits of the 12-bit state RtlRunFrame takes (bit i is JOY bit 15 - i).
+// Keys are named as on the GBA, mapped as the GBA build maps them (gba/main.c):
+// A is the SNES's B (jump), B is its Y (run); "x" and "y" are the SNES's A and X.
 static int KeyBit(const char *s, size_t n) {
-  static const char *const kNames[12] = { "b", "y", "select", "start", "up", "down",
-                                          "left", "right", "a", "x", "l", "r" };
+  static const char *const kNames[12] = { "a", "b", "select", "start", "up", "down",
+                                          "left", "right", "x", "y", "l", "r" };
   for (int i = 0; i < 12; i++)
     if (strlen(kNames[i]) == n && memcmp(kNames[i], s, n) == 0)
       return 1 << i;

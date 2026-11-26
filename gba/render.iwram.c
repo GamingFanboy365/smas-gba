@@ -363,7 +363,8 @@ static void BuildOam(uint16_t *out, const ViewMap *vm, const uint8_t *obj_prio) 
     if (y + h > 256) y -= 256;  // wraps to the top
     // Which region of the view it falls in, by its top line.
     int gy = y - vm->offset;
-    if (vm->split && y < vm->split + vm->top_offset) gy = y - vm->top_offset;
+    if (vm->split && !vm->hud_overlay && y < vm->split + vm->top_offset)
+      gy = y - vm->top_offset;
     int gx = x - vm->xoffset;
     uint16_t *d = &out[i * 4];
     if (gy >= kGbaLines || gy + h <= 0 || gx >= 240 || gx + kPix[size] <= 0 || y >= 224) {
@@ -437,15 +438,23 @@ void RenderBuildFrame(const ViewMap *vm) {
   uint16_t bd = cg0;
   for (int g = 0; g <= kGbaLines; g++) {
     int gl = g < kGbaLines ? g : kGbaLines - 1;
-    int r = gl + ((vm->split && gl < vm->split) ? vm->top_offset : vm->offset);
+    bool top = vm->split && gl < vm->split;
+    int r = gl + ((top && !vm->hud_overlay) ? vm->top_offset : vm->offset);
     if (r < 0) r = 0;
     if (r >= kSnesLines) r = kSnesLines - 1;
-    const LineRegs *lr = &g_line_regs[r];
+    // With the HUD overlaid, BG3 alone shows the HUD's rows at the top.
+    int rh = r;
+    if (top && vm->hud_overlay) {
+      rh = gl + vm->top_offset;
+      if (rh < 0) rh = 0;
+    }
+    const LineRegs *lr = &g_line_regs[r], *lh = &g_line_regs[rh];
     uint32_t *s = (uint32_t *)lt->scroll[g];
-    uint32_t dv = 1 + r - gl;
     for (int k = 0; k < 4; k++) {
       int layer = layer_of[k];
-      s[k] = ((lr->hofs[layer] + vm->xoffset) & 0xffff) | (uint32_t)(lr->vofs[layer] + dv) << 16;
+      const LineRegs *l = layer == 2 ? lh : lr;
+      uint32_t dv = 1 + (layer == 2 ? rh : r) - gl;
+      s[k] = ((l->hofs[layer] + vm->xoffset) & 0xffff) | (uint32_t)(l->vofs[layer] + dv) << 16;
     }
     if (bd_math && lr->fixed_color != last_fixed) {
       last_fixed = lr->fixed_color;

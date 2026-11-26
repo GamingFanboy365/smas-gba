@@ -17,6 +17,7 @@ enum {
   kRam_PlayerYLo = 0x237,
   kRam_GameMode = 0x770,
   kRam_GameModeTask = 0x772,
+  kRam_PlayerSize = 0x754,  // 0 big, 1 small
 };
 
 // The GBA's buttons as the SNES joypad word (B Y Sel Start U D L R A X L R).
@@ -39,37 +40,50 @@ static uint16_t ReadJoypad(void) {
   return j;
 }
 
-// The view: the HUD (SNES rows 8-31) pinned at the top, the rest following
-// Mario vertically, the middle 240 of the 256 columns.
-enum { kHudLines = 24, kHudTop = 8, kMinOffset = 8, kMaxOffset = 64 };
+// The view. In a level: the whole 160 lines are the level, with BG3's HUD
+// rows (SNES rows 14-29) drawn over its top, as the Super Mario Advance games
+// do; the camera rests at the bottom, so the ground shows, and rises only
+// when Mario climbs or jumps high. Between levels: the HUD (rows 8-31) pinned
+// in a strip and the screen's content below it. The title: its middle.
+enum {
+  kHudLines = 24, kHudTop = 8,          // the pinned strip
+  kOverlayLines = 16, kOverlayTop = 14, // the overlaid HUD
+  kMaxOffset = 64,                      // SNES rows 64-223: the floor at the bottom
+  kHeadroom = 40,                       // lines kept above Mario's head
+};
 static int s_cam = kMaxOffset;
 
 static void UpdateView(ViewMap *vm) {
   vm->xoffset = 8;
-  vm->split = kHudLines;
-  vm->top_offset = kHudTop;
+  vm->hud_overlay = false;
   uint8_t mode = RAM8(kRam_GameMode), task = RAM8(kRam_GameModeTask);
-  int target;
   if (mode == 0) {
     // The title: the logo and the menu, no HUD.
     vm->split = 0;
     vm->offset = 38;
     return;
-  } else if ((mode == 1 && task >= 3) || mode == 2) {
-    // A level: follow Mario, keeping his feet between GBA lines 64 and 136.
-    int y = (RAM8(kRam_PlayerYHi) - 1) * 256 + RAM8(kRam_PlayerYLo) - 8;
-    int feet = y + 16;
-    target = s_cam;
-    if (feet - s_cam < 64) target = feet - 64;
-    if (feet - s_cam > 136) target = feet - 136;
-  } else {
-    // The intro card and the other screens between levels.
-    target = 32;
   }
-  if (target < kMinOffset) target = kMinOffset;
-  if (target > kMaxOffset) target = kMaxOffset;
-  s_cam = target;
-  vm->offset = s_cam;
+  if ((mode == 1 && task >= 3) || mode == 2) {
+    vm->split = kOverlayLines;
+    vm->top_offset = kOverlayTop;
+    vm->hud_overlay = true;
+    // Mario's box is 32 lines tall from his y; small Mario is its lower half.
+    int y = (RAM8(kRam_PlayerYHi) - 1) * 256 + RAM8(kRam_PlayerYLo);
+    int head = y + (RAM8(kRam_PlayerSize) ? 16 : 0);
+    int target = kMaxOffset;
+    if (head - target < kHeadroom) target = head - kHeadroom;
+    if (target < 0) target = 0;
+    // Ease toward it: up quickly (Mario can move 5 lines a frame), down slowly.
+    if (target < s_cam) s_cam -= (s_cam - target > 6) ? 6 : s_cam - target;
+    else if (target > s_cam) s_cam += (target - s_cam > 3) ? 3 : target - s_cam;
+    vm->offset = s_cam;
+    return;
+  }
+  // The intro card and the other screens between levels.
+  vm->split = kHudLines;
+  vm->top_offset = kHudTop;
+  vm->offset = 32;
+  s_cam = kMaxOffset;
 }
 
 int main(void) {

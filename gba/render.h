@@ -3,13 +3,16 @@
 #include <stdbool.h>
 
 // How the SNES's 256x224 picture is fitted onto the GBA's 240x160.
-// GBA line g shows SNES row g + top_offset for g < split (the HUD, pinned),
-// and SNES row g + offset below it; columns are shifted left by xoffset.
+// Columns are shifted left by xoffset; GBA line g shows SNES row g + offset.
+// For g < split, it shows row g + top_offset instead: for every layer
+// (a pinned strip), or with hud_overlay for BG3 alone, the HUD drawn over the
+// level the way the Super Mario Advance games draw theirs.
 typedef struct ViewMap {
   int xoffset;
-  int split;        // GBA line where the second region starts (0 for none)
+  int split;
   int top_offset;
   int offset;
+  bool hud_overlay;
 } ViewMap;
 
 void RenderInit(void);
