@@ -79,6 +79,10 @@ enum { kMaxLineStates = kSnesLines + 1 };
 extern LineRegs g_line_states[kMaxLineStates];
 extern uint8_t g_line_state[kSnesLines];
 extern bool g_line_regs_dirty;
+// Each line's scroll registers, apart from the states (per-line scrolling,
+// the water levels' waves, would make a state of every line): for each
+// layer, hofs | vofs << 16.
+extern uint32_t g_line_scroll[kSnesLines][4];
 // Which line registers changed anywhere in the frame: bits of kLineChanged.
 extern uint32_t g_line_changed;
 enum {

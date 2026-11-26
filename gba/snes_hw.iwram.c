@@ -26,6 +26,7 @@ uint16_t g_cgram_dirty;
 bool g_oam_dirty;
 EWRAM_BSS LineRegs g_line_states[kMaxLineStates];
 EWRAM_BSS uint8_t g_line_state[kSnesLines];
+EWRAM_BSS uint32_t g_line_scroll[kSnesLines][4];
 uint32_t g_line_changed;
 bool g_line_regs_dirty;
 
@@ -103,7 +104,7 @@ static void PpuWrite(uint8_t reg, uint8_t val) {
     uint16_t v = ((val << 8) | (p->scroll_prev & 0xf8) | (p->scroll_prev2 & 7)) & 0x3ff;
     if (p->cur.hofs[i] != v) {
       p->cur.hofs[i] = v;
-      g_line_changed |= kLineChanged_Hofs0 << i, g_line_regs_dirty = true;
+      g_line_changed |= kLineChanged_Hofs0 << i;
     }
     p->scroll_prev = p->scroll_prev2 = val;
     break;
@@ -113,7 +114,7 @@ static void PpuWrite(uint8_t reg, uint8_t val) {
     uint16_t v = ((val << 8) | p->scroll_prev) & 0x3ff;
     if (p->cur.vofs[i] != v) {
       p->cur.vofs[i] = v;
-      g_line_changed |= kLineChanged_Vofs0 << i, g_line_regs_dirty = true;
+      g_line_changed |= kLineChanged_Vofs0 << i;
     }
     p->scroll_prev = val;
     break;
@@ -536,6 +537,14 @@ void SnesRunLines(void (*irq_func)(void)) {
       for (unsigned k = 0; k < sizeof(LineRegs) / 4; k++) d[k] = c[k];
     }
     g_line_state[line - 1] = nstates - 1;
+    {
+      uint32_t *sc = g_line_scroll[line - 1];
+      const SnesPpu *pp = &s->ppu;
+      sc[0] = pp->cur.hofs[0] | (uint32_t)pp->cur.vofs[0] << 16;
+      sc[1] = pp->cur.hofs[1] | (uint32_t)pp->cur.vofs[1] << 16;
+      sc[2] = pp->cur.hofs[2] | (uint32_t)pp->cur.vofs[2] << 16;
+      sc[3] = pp->cur.hofs[3] | (uint32_t)pp->cur.vofs[3] << 16;
+    }
     if (line == s_next_any)
       HdmaDoLine(line);
     if (v_irq && line == s->vtime + 1) {

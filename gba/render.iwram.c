@@ -88,7 +88,7 @@ ROM_CODE static void InitSpread(void) {
   }
 }
 
-// On squashed screens the text layer's tiles lose row 7 (the title) or rows
+// On squashed screens the text layer's tiles lose row 5 (the title) or rows
 // 0 and 7 (the intro card). BG1/BG2's tiles are converted with the dropped
 // row merged into its neighbor: the neighbor's pixel where it has one, the
 // dropped row's where it's empty, so the outline shows past the letters'
@@ -110,8 +110,12 @@ static void Convert4bpp(volatile uint32_t *dst, const uint16_t *src, bool merge)
     rows[y] = sp[lo & 0xff] | sp[lo >> 8] << 1 | sp[hi & 0xff] << 2 | sp[hi >> 8] << 3;
   }
   if (merge) {
-    if (s_tiles_squashed == kSquashFull) rows[1] = MergeRows(rows[1], rows[0]);
-    rows[6] = MergeRows(rows[6], rows[7]);
+    if (s_tiles_squashed == kSquashFull) {
+      rows[1] = MergeRows(rows[1], rows[0]);
+      rows[6] = MergeRows(rows[6], rows[7]);
+    } else {
+      rows[4] = MergeRows(rows[4], rows[5]);
+    }
   }
   for (int y = 0; y < 8; y++) dst[y] = rows[y];
 }
@@ -424,9 +428,11 @@ ROM_CODE static void BuildSquashMap(int mode, int vofs3, int vofs1) {
   // with the text: the font's glyphs have their fill in rows 1-6 and their
   // outlines in 0 and 7. BG3 has the HUD (rows 0-31), BG2 the menus below.
   // The full squash keeps 168 of 224 and drops the first and last 4 more;
-  // the title's (rows 30 on, below the HUD's digits, only each tile row's
-  // last row dropped) keeps 169 of 194, the last 9 off the bottom.
-  int first = mode == kSquashTitle ? 30 : 0;
+  // the title's (rows 32 on, below the HUD, only each tile row's
+  // row 5 dropped: of the menu font's 36 glyphs, 21 repeat it in row 4 or
+  // 6, and its outlines in rows 0 and 7 stay) keeps 168 of 192, the last 8
+  // off the bottom.
+  int first = mode == kSquashTitle ? 32 : 0;
   int skip = mode == kSquashTitle ? 0 : 4;  // kept rows cut at the top
   int kept = 0, g = 0;
   for (int r = 0; r < kSnesLines; r++) {
@@ -435,7 +441,7 @@ ROM_CODE static void BuildSquashMap(int mode, int vofs3, int vofs1) {
       continue;
     }
     int phase = ((r < 32 ? vofs3 : vofs1) + r + 1) & 7;
-    bool keep = mode == kSquashTitle ? phase != 7 : (phase != 0 && phase != 7);
+    bool keep = mode == kSquashTitle ? phase != 5 : (phase != 0 && phase != 7);
     if (keep && kept++ >= skip && g < kGbaLines) s_rowmap[g++] = r;
     s_linemap[r] = g < kGbaLines ? g : kGbaLines;
   }
@@ -542,8 +548,7 @@ void RenderBuildFrame(const ViewMap *vm) {
   fr->blank = (p->inidisp & 0x80) != 0;
   fr->squash = vm->squash;
   if (vm->squash)
-    BuildSquashMap(vm->squash, g_line_states[g_line_state[0]].vofs[2],
-                   g_line_states[g_line_state[kSnesLines - 1]].vofs[1]);
+    BuildSquashMap(vm->squash, g_line_scroll[0][2] >> 16, g_line_scroll[kSnesLines - 1][1] >> 16);
   uint8_t tm = g_line_states[g_line_state[0]].tm, ts = g_line_states[g_line_state[0]].ts;
   bool sub_add = (p->cgwsel & 2) && (p->cgadsub & 0x20) && !(p->cgadsub & 0x1f);
   uint8_t sub_mask = sub_add ? ts : 0;
@@ -624,10 +629,11 @@ void RenderBuildFrame(const ViewMap *vm) {
   bool half = (p->cgadsub & 0x40) != 0, subtract = (p->cgadsub & 0x80) != 0;
   uint16_t cg0 = g_snes_cgram[0];
   bool per_line_bd = false;
-  uint32_t last_fixed = 0xffffffff;
   uint16_t bd = cg0;
-  int last_key = -1;
+  int last_key = -1, last_st = -1;
   uint16_t bd0 = 0;
+  // Without per-line scrolling, lines can share entries.
+  bool scroll_static = !(g_line_changed & 0xff);
   for (int g = 0; g <= kGbaLines; g++) {
     int gl = g < kGbaLines ? g : kGbaLines - 1;
     bool top = vm->split && gl < vm->split;
@@ -637,14 +643,25 @@ void RenderBuildFrame(const ViewMap *vm) {
     if (r >= kSnesLines) r = kSnesLines - 1;
     uint32_t *s = (uint32_t *)lt->scroll[g];
     int st = g_line_state[r];
-    // Lines whose state and region are the previous line's get its entry.
-    // The HUD's lines show other rows: never. Otherwise, the same state at
-    // the same distance between row and line (squashed lines skip rows).
-    int key = top ? -2 - g : (st << 8) | ((r - gl) & 0xff);
+    // The backdrop's (or the tint's) color, from the line's state.
+    if (st != last_st) {
+      last_st = st;
+      const LineRegs *lr = &g_line_states[st];
+      if (tint)
+        bd = MathOnLine(lr, p) ? lr->fixed_color : 0;
+      else if (bd_math)
+        bd = AddColors(cg0, lr->fixed_color, half, subtract);
+    }
+    if (g == 0) bd0 = bd;
+    lt->backdrop[g] = bd;
+    if (bd != bd0) per_line_bd = true;
+    // Lines in the same region at the same distance between row and line
+    // (squashed lines skip rows) get the previous line's entry, when the
+    // scroll is the same on every line. The HUD's lines show other rows.
+    int key = (top || !scroll_static) ? -2 - g : (r - gl) & 0xff;
     if (key == last_key && g != kGbaLines) {
       const uint32_t *prev = (const uint32_t *)lt->scroll[g - 1];
       s[0] = prev[0], s[1] = prev[1], s[2] = prev[2], s[3] = prev[3];
-      lt->backdrop[g] = bd;
       continue;
     }
     last_key = key;
@@ -654,22 +671,13 @@ void RenderBuildFrame(const ViewMap *vm) {
       rh = gl + vm->top_offset;
       if (rh < 0) rh = 0;
     }
-    const LineRegs *lr = &g_line_states[st], *lh = &g_line_states[g_line_state[rh]];
+    const uint32_t *sc = g_line_scroll[r], *sh = g_line_scroll[rh];
     for (int k = 0; k < 4; k++) {
       int layer = layer_of[k];
-      const LineRegs *l = layer == 2 ? lh : lr;
+      uint32_t v = layer == 2 ? sh[2] : sc[layer];
       uint32_t dv = 1 + (layer == 2 ? rh : r) - gl;
-      s[k] = ((l->hofs[layer] + vm->xoffset) & 0xffff) | (uint32_t)(l->vofs[layer] + dv) << 16;
+      s[k] = (((v & 0x3ff) + vm->xoffset) & 0xffff) | (((v >> 16) + dv) << 16);
     }
-    if (tint) {
-      bd = MathOnLine(lr, p) ? lr->fixed_color : 0;
-    } else if (bd_math && lr->fixed_color != last_fixed) {
-      last_fixed = lr->fixed_color;
-      bd = AddColors(cg0, lr->fixed_color, half, subtract);
-    }
-    if (g == 0) bd0 = bd;
-    lt->backdrop[g] = bd;
-    if (bd != bd0) per_line_bd = true;
   }
   fr->backdrop_per_line = per_line_bd;
 
