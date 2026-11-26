@@ -41,9 +41,8 @@ typedef struct SnesDmaChannel {
   uint8_t a1b;
   uint16_t das;           // DMA size, or HDMA indirect address
   uint8_t dasb;           // HDMA indirect bank
-  uint16_t a2a;           // HDMA table address
-  uint8_t ntrl;           // HDMA line counter
-  bool do_transfer, terminated;
+  uint16_t a2a;           // HDMA table address and line counter, as written:
+  uint8_t ntrl;           // HDMA itself runs from private state (snes_hw)
 } SnesDmaChannel;
 
 typedef struct Snes {
@@ -74,10 +73,13 @@ extern uint16_t g_cgram_dirty;
 extern bool g_oam_dirty;
 
 // The registers of each line of the last frame, filled by SnesRunLines: the
-// distinct states, in order, and each line's index into them.
+// distinct states, in order, and each line's index into them (with its
+// scroll record's, see below, in g_line_idx).
 enum { kMaxLineStates = kSnesLines + 1 };
 extern LineRegs g_line_states[kMaxLineStates];
-extern uint8_t g_line_state[kSnesLines];
+extern uint16_t g_line_idx[kSnesLines];  // state | scroll record << 8
+#define g_line_state_of(r) (g_line_idx[r] & 0xff)
+#define g_line_scroll_of(r) (g_line_idx[r] >> 8)
 extern bool g_line_regs_dirty;
 // Each line's scroll registers, apart from the states (scroll changes on
 // other lines than the rest): the distinct scroll records, in order (for
@@ -86,14 +88,13 @@ extern bool g_line_regs_dirty;
 // means layer k's hofs is g_scroll_bake[k][line], bit 4 + k its vofs is
 // g_scroll_bake[4 + k][line].
 extern uint32_t g_scroll_states[kSnesLines + 1][4];
-extern uint8_t g_line_scroll_state[kSnesLines];
 extern uint8_t g_scroll_baked;
 extern uint16_t g_scroll_bake[8][kSnesLines];
 extern bool g_scroll_dirty;
 
 // A line's scroll for a layer: hofs | vofs << 16.
 static inline uint32_t LineScroll(int line, int layer) {
-  uint32_t v = g_scroll_states[g_line_scroll_state[line]][layer];
+  uint32_t v = g_scroll_states[g_line_scroll_of(line)][layer];
   if (g_scroll_baked & (1 << layer)) v = (v & 0xffff0000) | g_scroll_bake[layer][line];
   if (g_scroll_baked & (16 << layer)) v = (v & 0xffff) | (uint32_t)g_scroll_bake[4 + layer][line] << 16;
   return v;

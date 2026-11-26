@@ -12,6 +12,7 @@
 // and a V-timer IRQ fires at the end of line VTIME + 1; both affect the line
 // after. Screen row r is line r + 1.
 #include <string.h>
+#include <stdio.h>
 #include "snes.h"
 #include "gba_hw.h"
 #include "platform.h"
@@ -25,9 +26,8 @@ uint32_t g_vram_dirty[0x8000 / 16 / 32];
 uint16_t g_cgram_dirty;
 bool g_oam_dirty;
 EWRAM_BSS LineRegs g_line_states[kMaxLineStates];
-EWRAM_BSS uint8_t g_line_state[kSnesLines];
+EWRAM_BSS uint16_t g_line_idx[kSnesLines];
 EWRAM_BSS uint32_t g_scroll_states[kSnesLines + 1][4];
-EWRAM_BSS uint8_t g_line_scroll_state[kSnesLines];
 uint8_t g_scroll_baked;
 bool g_scroll_dirty;
 uint32_t g_line_changed;
@@ -73,6 +73,8 @@ void SnesVramWrite(uint16_t addr, uint16_t value) {
 }
 
 static const uint8_t kVramIncr[4] = { 1, 32, 128, 128 };
+
+static inline void WriteColdata(uint8_t val);
 
 static void PpuWrite(uint8_t reg, uint8_t val) {
   SnesPpu *p = &g_snes->ppu;
@@ -172,18 +174,7 @@ static void PpuWrite(uint8_t reg, uint8_t val) {
   case 0x2f: p->tsw = val; break;
   case 0x30: p->cgwsel = val; break;
   case 0x31: p->cgadsub = val; break;
-  case 0x32: {
-    uint16_t c = p->cur.fixed_color, v = val & 0x1f;
-    if (val & 0x20) c = (c & ~0x001f) | v;
-    if (val & 0x40) c = (c & ~0x03e0) | v << 5;
-    if (val & 0x80) c = (c & ~0x7c00) | v << 10;
-    if (c != p->cur.fixed_color) {
-      p->cur.fixed_color = c;
-      g_line_changed |= kLineChanged_Fixed;
-      g_line_regs_dirty = true;
-    }
-    break;
-  }
+  case 0x32: WriteColdata(val); break;
   case 0x33: p->setini = val; break;
   case 0x40: case 0x41: case 0x42: case 0x43:
     ApuWritePort(reg & 3, val);
@@ -286,6 +277,45 @@ static void DoDma(SnesDmaChannel *c) {
     }
   }
 
+  // CGRAM, whole colors (the games send the whole palette at once).
+  if (!(c->dmap & 0x80) && mode == 0 && step == 1 && c->bbad == 0x22 && !p->cg_second &&
+      !(count & 1) && (uint32_t)c->a1t + count <= 0x10000) {
+    const uint8_t *src = SnesPtr(c->a1b << 16 | c->a1t);
+    uint32_t n = count >> 1;
+    uint8_t at = p->cgadd;
+    for (uint32_t k = 0; k < n; k++, at++) {
+      uint16_t col = (src[k * 2] | src[k * 2 + 1] << 8) & 0x7fff;
+      if (g_snes_cgram[at] != col) {
+        g_snes_cgram[at] = col;
+        g_cgram_dirty |= 1 << (at >> 4);
+      }
+    }
+    p->cgadd = at;
+    c->a1t += count;
+    c->das = 0;
+    return;
+  }
+
+  // One byte, again and again, to VRAM's low or high bytes (clearing maps).
+  if (!(c->dmap & 0x80) && mode == 0 && step == 0 && (c->bbad == 0x18 || c->bbad == 0x19) &&
+      (p->vmain & 0x0c) == 0 && ((p->vmain & 0x80) != 0) == (c->bbad == 0x19)) {
+    uint32_t v = *SnesPtr(c->a1b << 16 | c->a1t);
+    uint32_t inc = kVramIncr[p->vmain & 3];
+    uint16_t a = p->vmadd;
+    bool high = c->bbad == 0x19;
+    for (uint32_t k = 0; k < count; k++, a += inc) {
+      uint16_t va = a & 0x7fff, old = g_snes_vram[va];
+      uint16_t nv = high ? (old & 0x00ff) | v << 8 : (old & 0xff00) | v;
+      if (nv != old) {
+        g_snes_vram[va] = nv;
+        MarkVramDirty(va);
+      }
+    }
+    p->vmadd = a;
+    c->das = 0;
+    return;
+  }
+
   // A fill from the PPU's multiplier (the games clear RAM this way): the
   // value is the same for every byte.
   if ((c->dmap & 0x80) && c->bbad == 0x34 && mode == 0 && step == 1 &&
@@ -296,6 +326,9 @@ static void DoDma(SnesDmaChannel *c) {
     return;
   }
 
+#ifdef SMAS_LOG_SLOW_DMA
+  printf("slow dma: dmap %02x bbad %02x count %u from %02x:%04x", c->dmap, c->bbad, (unsigned)count, c->a1b, c->a1t);
+#endif
   uint8_t i = 0;
   do {
     uint8_t breg = c->bbad + kBAdrOffsets[mode][i];
@@ -317,7 +350,7 @@ static void DoMdmaen(uint8_t val) {
       DoDma(&g_snes->dma[i]);
 }
 
-static void DmaRegWrite(uint16_t reg, uint8_t val) {
+ROM_CODE static void DmaRegWrite(uint16_t reg, uint8_t val) {
   SnesDmaChannel *c = &g_snes->dma[(reg >> 4) & 7];
   switch (reg & 0xf) {
   case 0: c->dmap = val; break;
@@ -431,75 +464,94 @@ ROM_CODE uint16_t ReadRegWord(uint16_t reg) {
 }
 
 // ---- HDMA and the line walk ----
-// The channels' table and indirect pointers are resolved once per table
-// entry, not per byte: tables don't cross a bank in these games.
+// HDMA runs from private state (HdmaChan): the table and indirect pointers
+// are resolved once per table entry, not per byte (tables don't cross a
+// bank in these games), and the channels' registers ($43x8-$43xA), which
+// the games never read back, aren't updated as it goes.
+//
+// A channel is visited only on the lines where it does something: a
+// transfer (a repeating entry's every line, another entry's first) or the
+// step to its next table entry. In between, its line counter is caught up
+// at once. The line walk itself goes from one such line to the next.
 
-static const uint8_t *s_hdma_table[8], *s_hdma_ind[8];
+typedef struct HdmaChan {
+  const uint8_t *tbl, *ind;
+  int16_t next, last;       // the next line it acts on, the last it did
+  uint8_t ntrl, mode, bbad, dasb;
+  bool indirect, do_transfer, coldata;
+} HdmaChan;
 
-static uint8_t HdmaReadTable(int i) {
-  SnesDmaChannel *c = &g_snes->dma[i];
-  c->a2a++;
-  return *s_hdma_table[i]++;
-}
-
-static void HdmaLoadIndirect(int i) {
-  SnesDmaChannel *c = &g_snes->dma[i];
-  c->das = HdmaReadTable(i);
-  c->das |= HdmaReadTable(i) << 8;
-  // The gradients' data is in low RAM: no need for SnesPtr's bank decoding.
-  if ((c->dasb & 0x7f) < 0x40 && c->das < 0x2000)
-    s_hdma_ind[i] = &g_ram[c->das];
-  else
-    s_hdma_ind[i] = SnesPtr(c->dasb << 16 | c->das);
-}
-
-// Lines are processed per channel only where the channel does something:
-// a transfer (a repeating entry's every line, another entry's first) or
-// the step to its next table entry. In between, its line counter is caught
-// up at once. s_next[i] is that line; s_last[i] the last one handled.
-static int16_t s_next[8], s_last[8];
+static HdmaChan s_hc[8];
 static int16_t s_next_any;
 static uint8_t s_hdma_active;  // channels not yet terminated
 
+static inline const uint8_t *HdmaIndirectPtr(uint8_t bank, uint16_t addr) {
+  // The gradients' data is in low RAM: no need for SnesPtr's bank decoding.
+  if ((bank & 0x7f) < 0x40 && addr < 0x2000) return &g_ram[addr];
+  return SnesPtr(bank << 16 | addr);
+}
+
+static inline void WriteColdata(uint8_t val) {
+  SnesPpu *p = &g_snes->ppu;
+  uint16_t c = p->cur.fixed_color, v = val & 0x1f;
+  if (val & 0x20) c = (c & ~0x001f) | v;
+  if (val & 0x40) c = (c & ~0x03e0) | v << 5;
+  if (val & 0x80) c = (c & ~0x7c00) | v << 10;
+  if (c != p->cur.fixed_color) {
+    p->cur.fixed_color = c;
+    g_line_changed |= kLineChanged_Fixed;
+    g_line_regs_dirty = true;
+  }
+}
+
 // Channels that only write a scroll register twice a line (the water
-// levels' waves) are baked: their whole table is read at once into a value
-// per line, which the line walk takes instead of the register.
-// s_baked: bit k for hofs of layer k, bit 4 + k for vofs.
-#define s_baked g_scroll_baked
-#define s_bake g_scroll_bake
+// levels' waves, every line) are baked: their whole table is read at once
+// into a value per line, which the frame build takes instead of the
+// register. g_scroll_baked: bit k for hofs of layer k, bit 4 + k for vofs.
 EWRAM_BSS uint16_t g_scroll_bake[8][kSnesLines];
 
-ROM_CODE static bool HdmaBake(int i) {
-  SnesDmaChannel *c = &g_snes->dma[i];
+static bool HdmaBake(const SnesDmaChannel *c) {
   if ((c->dmap & 7) != 2 || c->bbad < 0x0d || c->bbad > 0x14) return false;
   int reg = c->bbad - 0x0d;
   int slot = (reg & 1) ? 4 + (reg >> 1) : (reg >> 1);
-  uint16_t *out = s_bake[slot];
+  uint16_t *out = g_scroll_bake[slot];
   const uint8_t *table = SnesPtr(c->a1b << 16 | c->a1t);
-  uint16_t value = (reg & 1) ? g_snes->ppu.cur.vofs[reg >> 1] : g_snes->ppu.cur.hofs[reg >> 1];
+  bool indirect = c->dmap & 0x40;
+  uint32_t value = (reg & 1) ? g_snes->ppu.cur.vofs[reg >> 1] : g_snes->ppu.cur.hofs[reg >> 1];
   int line = 0;
   while (line < kSnesLines) {
-    uint8_t ntrl = *table++;
+    uint32_t ntrl = *table++;
     if (!ntrl) break;
-    const uint8_t *data;
-    if (c->dmap & 0x40) {
-      data = SnesPtr(c->dasb << 16 | table[0] | table[1] << 8);
+    const uint8_t *data = table;
+    if (indirect) {
+      data = HdmaIndirectPtr(c->dasb, table[0] | table[1] << 8);
       table += 2;
-    } else {
-      data = table;
     }
+    // A count of 0 with the repeat bit is 128 lines and one transfer, as the
+    // reference emulator has it.
     int n = ntrl & 0x7f;
-    for (int k = 0; k < n && line < kSnesLines; k++, line++) {
-      if (k == 0 || (ntrl & 0x80)) {
-        value = (data[1] << 8 | data[0]) & 0x3ff;
-        data += 2;
+    bool repeat = (ntrl & 0x80) && n;
+    if (!n) n = 128;
+    int m = n < kSnesLines - line ? n : kSnesLines - line;
+    if (repeat) {
+      if (!((uintptr_t)data & 1)) {
+        const uint16_t *d16 = (const uint16_t *)data;
+        for (int k = 0; k < m; k++) out[line + k] = d16[k] & 0x3ff;
+      } else {
+        for (int k = 0; k < m; k++) out[line + k] = (data[k * 2] | data[k * 2 + 1] << 8) & 0x3ff;
       }
-      out[line] = value;
+      value = out[line + m - 1];
+      data += n * 2;
+    } else {
+      value = (data[0] | data[1] << 8) & 0x3ff;
+      for (int k = 0; k < m; k++) out[line + k] = value;
+      data += 2;
     }
-    if (!(c->dmap & 0x40)) table = data;
+    line += m;
+    if (!indirect) table = data;
   }
   for (; line < kSnesLines; line++) out[line] = value;
-  s_baked |= 1 << slot;
+  g_scroll_baked |= 1 << slot;
   g_line_changed |= (slot < 4) ? kLineChanged_Hofs0 << slot : kLineChanged_Vofs0 << (slot - 4);
   return true;
 }
@@ -507,115 +559,112 @@ ROM_CODE static bool HdmaBake(int i) {
 ROM_CODE static void HdmaInit(void) {
   s_next_any = 0x7fff;
   s_hdma_active = 0;
-  s_baked = 0;
   for (int i = 0; i < 8; i++) {
-    SnesDmaChannel *c = &g_snes->dma[i];
-    c->terminated = false;
-    s_next[i] = 0x7fff;
-    if (!(g_snes->hdmaen & (1 << i))) {
-      c->do_transfer = false;
-      continue;
+    const SnesDmaChannel *c = &g_snes->dma[i];
+    HdmaChan *h = &s_hc[i];
+    h->next = 0x7fff;
+    if (!(g_snes->hdmaen & (1 << i))) continue;
+    if (HdmaBake(c)) continue;
+    h->tbl = SnesPtr(c->a1b << 16 | c->a1t);
+    h->mode = c->dmap & 7;
+    h->bbad = c->bbad;
+    h->dasb = c->dasb;
+    h->indirect = c->dmap & 0x40;
+    h->coldata = h->mode == 0 && c->bbad == 0x32;
+    h->ntrl = *h->tbl++;
+    if (h->ntrl == 0) continue;
+    if (h->indirect) {
+      h->ind = HdmaIndirectPtr(h->dasb, h->tbl[0] | h->tbl[1] << 8);
+      h->tbl += 2;
     }
-    if (HdmaBake(i)) {
-      c->terminated = true;
-      continue;
-    }
-    c->a2a = c->a1t;
-    s_hdma_table[i] = SnesPtr(c->a1b << 16 | c->a2a);
-    c->ntrl = HdmaReadTable(i);
-    if (c->ntrl == 0) {
-      c->terminated = true;
-      continue;
-    }
-    if (c->dmap & 0x40)
-      HdmaLoadIndirect(i);
-    c->do_transfer = true;
-    s_next[i] = 0;
-    s_last[i] = -1;
+    h->do_transfer = true;
+    h->next = 0;
+    h->last = -1;
     s_next_any = 0;
     s_hdma_active |= 1 << i;
   }
 }
 
-static void HdmaStep(int i, int line) {
-  SnesDmaChannel *c = &g_snes->dma[i];
-  c->ntrl -= line - s_last[i] - 1;  // the idle lines since the last one
-  s_last[i] = line;
-  if (c->do_transfer) {
-    uint8_t mode = c->dmap & 7;
-    const uint8_t **src = (c->dmap & 0x40) ? &s_hdma_ind[i] : &s_hdma_table[i];
-    int n = kTransferLength[mode];
-    if (mode == 2 && c->bbad >= 0x0d && c->bbad <= 0x14) {
-      // A scroll register written twice (the water levels' waves, every
-      // line): straight to it.
-      SnesPpu *p = &g_snes->ppu;
-      const uint8_t *d = *src;
-      uint16_t v = (d[1] << 8 | d[0]) & 0x3ff;
-      int k = (c->bbad - 0x0d) >> 1;
-      if (!((c->bbad - 0x0d) & 1)) {
-        if (p->cur.hofs[k] != v) p->cur.hofs[k] = v, g_line_changed |= kLineChanged_Hofs0 << k, g_scroll_dirty = true;
-        p->scroll_prev2 = d[1];
-      } else {
-        if (p->cur.vofs[k] != v) p->cur.vofs[k] = v, g_line_changed |= kLineChanged_Vofs0 << k, g_scroll_dirty = true;
-      }
-      p->scroll_prev = d[1];
-      *src += 2;
-    } else if (mode == 0 && c->bbad == 0x32) {
-      // COLDATA (the gradients): straight to the fixed color.
-      SnesPpu *p = &g_snes->ppu;
-      uint8_t val = *(*src)++;
-      uint16_t col = p->cur.fixed_color, v = val & 0x1f;
-      if (val & 0x20) col = (col & ~0x001f) | v;
-      if (val & 0x40) col = (col & ~0x03e0) | v << 5;
-      if (val & 0x80) col = (col & ~0x7c00) | v << 10;
-      if (col != p->cur.fixed_color) {
-        p->cur.fixed_color = col;
-        g_line_changed |= kLineChanged_Fixed;
-        g_line_regs_dirty = true;
-      }
+static void HdmaStep(HdmaChan *h, int line) {
+  uint32_t ntrl = h->ntrl - (line - h->last - 1);  // the idle lines since the last one
+  h->last = line;
+  if (h->do_transfer) {
+    const uint8_t *src = h->indirect ? h->ind : h->tbl;
+    if (h->coldata) {
+      WriteColdata(*src++);  // the gradients
     } else {
+      int mode = h->mode, n = kTransferLength[mode];
       for (int j = 0; j < n; j++)
-        PpuWrite(c->bbad + kBAdrOffsets[mode][j], *(*src)++);
+        PpuWrite(h->bbad + kBAdrOffsets[mode][j], *src++);
     }
-    if (c->dmap & 0x40) c->das += n; else c->a2a += n;
+    if (h->indirect) h->ind = src; else h->tbl = src;
   }
-  c->ntrl--;
-  c->do_transfer = c->ntrl & 0x80;
-  if ((c->ntrl & 0x7f) == 0) {
-    c->ntrl = HdmaReadTable(i);
-    if (c->dmap & 0x40)
-      HdmaLoadIndirect(i);
-    if (c->ntrl == 0) c->terminated = true;
-    c->do_transfer = true;
+  ntrl = (ntrl - 1) & 0xff;
+  bool transfer = ntrl & 0x80;
+  if (!(ntrl & 0x7f)) {
+    ntrl = *h->tbl++;
+    if (h->indirect) {
+      h->ind = HdmaIndirectPtr(h->dasb, h->tbl[0] | h->tbl[1] << 8);
+      h->tbl += 2;
+    }
+    transfer = true;
+    if (!ntrl) {
+      h->next = 0x7fff;  // the table's end
+      return;
+    }
   }
-  if (c->terminated)
-    s_next[i] = 0x7fff;
-  else
-    s_next[i] = c->do_transfer ? line + 1 : line + (c->ntrl & 0x7f);
+  if (!transfer) {
+    // The entry's other lines do nothing, and its last one fetches the next
+    // entry, which transfers on the line after: fetch it now and come back
+    // then, one visit an entry instead of two. (It reads the table some
+    // lines early; the games don't change tables in mid-picture.)
+    int at = line + (ntrl & 0x7f) + 1;
+    ntrl = *h->tbl++;
+    if (h->indirect) {
+      h->ind = HdmaIndirectPtr(h->dasb, h->tbl[0] | h->tbl[1] << 8);
+      h->tbl += 2;
+    }
+    if (!ntrl) {
+      h->next = 0x7fff;
+      return;
+    }
+    h->ntrl = ntrl;
+    h->do_transfer = true;
+    h->last = at - 1;
+    h->next = at;
+    return;
+  }
+  h->ntrl = ntrl;
+  h->do_transfer = true;
+  h->next = line + 1;
 }
 
 static void HdmaDoLine(int line) {
   int next = 0x7fff;
   uint32_t active = s_hdma_active;
-  for (int i = 0; active; i++, active >>= 1) {
+  HdmaChan *h = s_hc;
+  for (int i = 0; active; i++, h++, active >>= 1) {
     if (!(active & 1)) continue;
-    if (s_next[i] == line) {
-      HdmaStep(i, line);
-      if (s_next[i] == 0x7fff) s_hdma_active &= ~(1 << i);
+    if (h->next == line) {
+      HdmaStep(h, line);
+      if (h->next == 0x7fff) s_hdma_active &= ~(1 << i);
     }
-    if (s_next[i] < next) next = s_next[i];
+    if (h->next < next) next = h->next;
   }
   s_next_any = next;
 }
 
 void SnesRunLines(void (*irq_func)(void)) {
   Snes *s = g_snes;
-  // Line 0: HDMA starts, and transfers for line 1 (screen row 0).
   s->line = 0;
   g_line_changed = 0;
-  bool v_irq = (s->nmitimen & 0x30) == 0x20 && irq_func;
+  // A V-timer IRQ fires at the end of line VTIME + 1.
+  int irq_line = 0x7fff;
+  if ((s->nmitimen & 0x30) == 0x20 && irq_func && s->vtime < kSnesLines)
+    irq_line = s->vtime + 1;
+  // Line 0: HDMA starts, and transfers for line 1 (screen row 0).
   s_next_any = 0x7fff;
-  s_baked = 0;
+  g_scroll_baked = 0;
   if (s->hdmaen) {
     HdmaInit();
     if (s_next_any == 0) HdmaDoLine(0);
@@ -623,15 +672,15 @@ void SnesRunLines(void (*irq_func)(void)) {
   int nstates = 0, nscroll = 0;
   g_line_regs_dirty = true;
   g_scroll_dirty = true;
-  for (int line = 1; line <= kSnesLines; line++) {
-    s->line = line;
+  // From one line where something happens to the next: rows cur to next - 1
+  // (lines cur + 1 to next) show the registers as they are now.
+  for (int cur = 0;;) {
     if (g_line_regs_dirty) {
       g_line_regs_dirty = false;
       uint32_t *d = (uint32_t *)&g_line_states[nstates++];
       const uint32_t *c = (const uint32_t *)&s->ppu.cur;
       for (unsigned k = 0; k < sizeof(LineRegs) / 4; k++) d[k] = c[k];
     }
-    g_line_state[line - 1] = nstates - 1;
     if (g_scroll_dirty) {
       g_scroll_dirty = false;
       uint32_t *sc = g_scroll_states[nscroll++];
@@ -641,17 +690,24 @@ void SnesRunLines(void (*irq_func)(void)) {
       sc[2] = pp->cur.hofs[2] | (uint32_t)pp->cur.vofs[2] << 16;
       sc[3] = pp->cur.hofs[3] | (uint32_t)pp->cur.vofs[3] << 16;
     }
-    g_line_scroll_state[line - 1] = nscroll - 1;
-    if (line == s_next_any)
-      HdmaDoLine(line);
-    if (v_irq && line == s->vtime + 1) {
+    int next = s_next_any < irq_line ? s_next_any : irq_line;
+    if (next > kSnesLines) next = kSnesLines;
+    uint16_t idx = (nstates - 1) | (nscroll - 1) << 8;
+    for (int r = cur; r < next; r++) g_line_idx[r] = idx;
+    cur = next;
+    s->line = next;
+    if (next == s_next_any)
+      HdmaDoLine(next);
+    if (next == irq_line) {
+      irq_line = 0x7fff;
       s->timeup = true;
       irq_func();
     }
+    if (next == kSnesLines) break;
   }
   for (int k = 0; k < 4; k++) {
-    if (s_baked & (1 << k)) s->ppu.cur.hofs[k] = s_bake[k][kSnesLines - 1];
-    if (s_baked & (16 << k)) s->ppu.cur.vofs[k] = s_bake[4 + k][kSnesLines - 1];
+    if (g_scroll_baked & (1 << k)) s->ppu.cur.hofs[k] = g_scroll_bake[k][kSnesLines - 1];
+    if (g_scroll_baked & (16 << k)) s->ppu.cur.vofs[k] = g_scroll_bake[4 + k][kSnesLines - 1];
   }
   s->line = 0;
   s->rdnmi = true;

@@ -76,7 +76,7 @@ ROM_CODE static void MixerReset(void) {
   d->noise = -0x4000;
 }
 
-static void KeyOn(Voice *v) {
+ROM_CODE static void KeyOn(Voice *v) {
   const SampleEntry *e = (const SampleEntry *)(s_pcm_asset + 4) + (v->srcn < kNumSamples ? v->srcn : 0);
   v->lp_noise = v->srcn == kNoiseSrcn;
   if (v->srcn >= kNumSamples || (!e->length && !v->lp_noise)) {
@@ -94,7 +94,7 @@ static void KeyOn(Voice *v) {
   v->on = true;
 }
 
-void MixerWrite(uint8_t adr, uint8_t val) {
+ROM_CODE void MixerWrite(uint8_t adr, uint8_t val) {
   MixerState *d = &s_dsp;
   Voice *v = &d->v[adr >> 4];
   switch (adr & 0xf) {
@@ -235,7 +235,7 @@ static void MixVoice(Voice *v, int32_t *mix, int count, const int16_t *noise) {
 }
 
 // The DSP's noise generator, one value per output sample.
-static void MakeNoise(int16_t *out, int count, int dsp_per_sample) {
+ROM_CODE static void MakeNoise(int16_t *out, int count, int dsp_per_sample) {
   MixerState *d = &s_dsp;
   int rate = kRates[d->flg & 0x1f];
   int32_t n = d->noise;

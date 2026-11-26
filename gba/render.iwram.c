@@ -432,6 +432,7 @@ static bool MathOnLine(const LineRegs *l, const SnesPpu *p) {
 // GBA line g shows SNES row s_rowmap[g]; s_linemap[r] is the first GBA line
 // showing row r or a later one (for sprites), negative above the first.
 EWRAM_BSS static uint8_t s_rowmap[kGbaLines];
+static uint16_t s_rowmap_version;
 EWRAM_BSS static int16_t s_linemap[kSnesLines];
 
 // The title's text bands: rows of BG1's map with the font's tiles (0x00-
@@ -458,6 +459,7 @@ ROM_CODE static void BuildSquashMap(int mode, int vofs3, int vofs1) {
   }
   if (mode == last_mode && vofs3 == last3 && vofs1 == last1 && bands == last_bands) return;
   last_mode = mode, last3 = vofs3, last1 = vofs1, last_bands = bands;
+  s_rowmap_version++;
   int g = 0;
   if (mode == kSquashTitle) {
     // Rows 32-223 (no HUD): text rows kept, 32 of the others dropped.
@@ -549,6 +551,11 @@ __attribute__((noinline)) static void BuildOam(uint16_t *out, const ViewMap *vm,
   }
   for (int i = 0; i < 128; i++) {
     const uint8_t *o = &g_snes_oam[i * 4];
+    if (o[1] == 0xf0) {
+      // Where the games park the sprites they don't show: most of them.
+      out[i * 4] = 0x200;
+      continue;
+    }
     uint8_t hb = g_snes_oam[0x200 + (i >> 2)] >> ((i & 3) * 2);
     int size = sizes[(hb >> 1) & 1];
     int h = kPix[size];
@@ -573,6 +580,54 @@ __attribute__((noinline)) static void BuildOam(uint16_t *out, const ViewMap *vm,
     d[0] = (gy & 0xff);
     d[1] = (gx & 0x1ff) | ((o[3] & 0x40) << 6) | ((o[3] & 0x80) << 6) | size << 14;
     d[2] = g | obj_prio[(o[3] >> 4) & 3] << 10 | ((o[3] >> 1) & 7) << 12;
+  }
+}
+
+// ---- the view's rows ----
+// Which SNES row each GBA line shows, as runs of lines at the same distance
+// (row = line + delta): one or two in a level, one per kept run of rows when
+// squashed. s_segs[0] is the layers', s_segs[1] BG3's, which with the HUD
+// overlaid shows the HUD's rows at the top. Rebuilt when the view changes.
+typedef struct RowSeg { uint8_t g0, g1; int16_t delta; } RowSeg;
+EWRAM_BSS static RowSeg s_segs[2][kGbaLines];
+static uint8_t s_nsegs[2];
+static uint16_t s_segs_version = 1;
+// What each line table's columns hold, to leave alone those that would be
+// filled with the same again: the version of the segments they were made
+// with (0: not that kind of fill, 0xffff: zeros) and the entry's base.
+static uint16_t s_col_ver[2][4];
+static uint32_t s_col_base[2][4];
+static bool s_bd_varies[2];
+
+ROM_CODE static void BuildSegs(const ViewMap *vm) {
+  static ViewMap last;
+  static uint16_t last_rowmap = 0xffff;
+  if (last.xoffset == vm->xoffset && last.split == vm->split && last.top_offset == vm->top_offset &&
+      last.offset == vm->offset && last.hud_overlay == vm->hud_overlay &&
+      last.squash == vm->squash && last_rowmap == s_rowmap_version)
+    return;
+  last = *vm;
+  last_rowmap = s_rowmap_version;
+  if (++s_segs_version >= 0x7fff) s_segs_version = 1;
+  for (int which = 0; which < 2; which++) {
+    RowSeg *seg = s_segs[which];
+    int n = 0;
+    for (int g = 0; g < kGbaLines; g++) {
+      bool top = vm->split && g < vm->split;
+      int r = vm->squash ? s_rowmap[g]
+                         : g + ((top && !vm->hud_overlay) ? vm->top_offset : vm->offset);
+      if (which && top && vm->hud_overlay) r = g + vm->top_offset;
+      if (r < 0) r = 0;
+      if (r >= kSnesLines) r = kSnesLines - 1;
+      int delta = r - g;
+      if (n && seg[n - 1].delta == delta) {
+        seg[n - 1].g1 = g + 1;
+      } else {
+        seg[n].g0 = g, seg[n].g1 = g + 1, seg[n].delta = delta;
+        n++;
+      }
+    }
+    s_nsegs[which] = n;
   }
 }
 
@@ -601,7 +656,7 @@ void RenderBuildFrame(const ViewMap *vm) {
   fr->squash = vm->squash;
   if (vm->squash)
     BuildSquashMap(vm->squash, LineScroll(0, 2) >> 16, LineScroll(kSnesLines - 1, 1) >> 16);
-  uint8_t tm = g_line_states[g_line_state[0]].tm, ts = g_line_states[g_line_state[0]].ts;
+  uint8_t tm = g_line_states[g_line_state_of(0)].tm, ts = g_line_states[g_line_state_of(0)].ts;
   bool sub_add = (p->cgwsel & 2) && (p->cgadsub & 0x20) && !(p->cgadsub & 0x1f);
   uint8_t sub_mask = sub_add ? ts : 0;
 
@@ -681,91 +736,114 @@ void RenderBuildFrame(const ViewMap *vm) {
   bool half = (p->cgadsub & 0x40) != 0, subtract = (p->cgadsub & 0x80) != 0;
   uint16_t cg0 = g_snes_cgram[0];
   bool per_line_bd = false;
-  // Each GBA line's SNES row (and BG3's, which with the HUD overlaid shows
-  // the HUD's rows at the top).
-  static uint8_t row_of[kGbaLines + 1], row3_of[kGbaLines + 1];
-  for (int g = 0; g <= kGbaLines; g++) {
-    int gl = g < kGbaLines ? g : kGbaLines - 1;
-    bool top = vm->split && gl < vm->split;
-    int r = vm->squash ? s_rowmap[gl]
-                       : gl + ((top && !vm->hud_overlay) ? vm->top_offset : vm->offset);
-    if (r < 0) r = 0;
-    if (r >= kSnesLines) r = kSnesLines - 1;
-    int rh = r;
-    if (top && vm->hud_overlay) {
-      rh = gl + vm->top_offset;
-      if (rh < 0) rh = 0;
-    }
-    row_of[g] = r, row3_of[g] = rh;
-  }
   // The scroll registers, a layer at a time: hofs + xoffset | vofs + 1 +
-  // row - line (line kGbaLines repeats the last one).
+  // row - line.
+  BuildSegs(vm);
   int nused = k0 + lp.nbg;
   for (int k = 0; k < 4; k++) {
     int layer = layer_of[k];
-    const uint8_t *rows = layer == 2 ? row3_of : row_of;
+    int which = layer == 2;
     uint32_t *col = (uint32_t *)lt->scroll + k;
     if (k >= nused || (tint && k == tint_bg)) {
       // Not shown, or the tint (one tile everywhere): no scroll.
-      for (int g = 0; g <= kGbaLines; g++) col[g * 4] = 0;
+      if (s_col_ver[b][k] != 0xffff) {
+        s_col_ver[b][k] = 0xffff;
+        for (int g = 0; g < kGbaLines; g++) col[g * 4] = 0;
+      }
       continue;
     }
+    const RowSeg *seg = s_segs[which], *seg_end = seg + s_nsegs[which];
     const uint32_t *states = &g_scroll_states[0][layer];
     const uint16_t *bh = (g_scroll_baked & (1 << layer)) ? g_scroll_bake[layer] : NULL;
     const uint16_t *bv = (g_scroll_baked & (16 << layer)) ? g_scroll_bake[4 + layer] : NULL;
-    uint32_t changes = (kLineChanged_Hofs0 | kLineChanged_Vofs0) << layer;
-    if (!bh && !bv && !(g_line_changed & changes)) {
-      // The same scroll on every line: only the row-line distance varies.
+    uint32_t xoff = vm->xoffset;
+    bool h_static = !bh && !(g_line_changed & (kLineChanged_Hofs0 << layer));
+    bool v_static = !bv && !(g_line_changed & (kLineChanged_Vofs0 << layer));
+    if (h_static && v_static) {
+      // The same scroll on every line: an entry a segment. If the column
+      // has just that from two frames ago, it stays.
       uint32_t v = states[0];
-      uint32_t h = ((v & 0x3ff) + vm->xoffset) & 0xffff, vv = (v >> 16) + 1;
-      for (int g = 0; g <= kGbaLines; g++) {
-        int gl = g < kGbaLines ? g : kGbaLines - 1;
-        col[g * 4] = h | ((vv + rows[g] - gl) << 16);
+      uint32_t base = ((v & 0x3ff) + xoff) & 0xffff;
+      base |= ((v >> 16) + 1) << 16;
+      uint16_t ver = s_segs_version * 2 + which;
+      if (s_col_ver[b][k] == ver && s_col_base[b][k] == base) continue;
+      s_col_ver[b][k] = ver, s_col_base[b][k] = base;
+      for (; seg < seg_end; seg++) {
+        uint32_t e = base + ((uint32_t)seg->delta << 16);
+        uint32_t *c = col + seg->g0 * 4, *c_end = col + seg->g1 * 4;
+        for (; c < c_end; c += 4) *c = e;
       }
       continue;
     }
-    if (!bh && !bv) {
-      // A few scroll records (the HUD's split): lines with the previous
-      // line's record and row-line distance get its entry.
-      uint32_t last_key = 0xffffffff, e = 0;
-      for (int g = 0; g <= kGbaLines; g++) {
-        int gl = g < kGbaLines ? g : kGbaLines - 1;
-        int r = rows[g];
-        uint32_t idx = g_line_scroll_state[r];
-        uint32_t key = idx | (uint32_t)(r - gl) << 8;
-        if (key != last_key) {
-          last_key = key;
+    s_col_ver[b][k] = 0;
+    if (bh && v_static) {
+      // Its hofs baked for every line (the water's waves), vofs the same.
+      uint32_t vv = (states[0] >> 16) + 1;
+      for (; seg < seg_end; seg++) {
+        uint32_t ev = (vv + seg->delta) << 16;
+        const uint16_t *src = bh + seg->g0 + seg->delta;
+        uint32_t *c = col + seg->g0 * 4, *c_end = col + seg->g1 * 4;
+        for (; c < c_end; c += 4) *c = ((*src++ + xoff) & 0xffff) | ev;
+      }
+      continue;
+    }
+    // Scroll records (the HUD's split, a mid-picture IRQ), baked or not.
+    for (; seg < seg_end; seg++) {
+      int delta = seg->delta;
+      uint32_t last = 0xffffffff, hh = 0, vv = 0;
+      for (int g = seg->g0; g < seg->g1; g++) {
+        int r = g + delta;
+        uint32_t idx = g_line_scroll_of(r);
+        if (idx != last) {
+          last = idx;
           uint32_t v = states[idx * 4];
-          e = (((v & 0x3ff) + vm->xoffset) & 0xffff) | (((v >> 16) + 1 + r - gl) << 16);
+          hh = v & 0x3ff, vv = v >> 16;
         }
-        col[g * 4] = e;
+        uint32_t h = bh ? bh[r] : hh, w = bv ? bv[r] : vv;
+        col[g * 4] = ((h + xoff) & 0xffff) | ((w + 1 + delta) << 16);
       }
-      continue;
-    }
-    for (int g = 0; g <= kGbaLines; g++) {
-      int gl = g < kGbaLines ? g : kGbaLines - 1;
-      int r = rows[g];
-      uint32_t v = states[g_line_scroll_state[r] * 4];
-      uint32_t h = bh ? bh[r] : (v & 0x3ff), vv = bv ? bv[r] : (v >> 16);
-      col[g * 4] = ((h + vm->xoffset) & 0xffff) | ((vv + 1 + r - gl) << 16);
     }
   }
+  // Line kGbaLines (for the HBlank after the last line) repeats it.
+  {
+    uint32_t *last = (uint32_t *)lt->scroll[kGbaLines - 1];
+    last[4] = last[0], last[5] = last[1], last[6] = last[2], last[7] = last[3];
+  }
   // The backdrop's (or the tint's) color, from each line's state.
-  uint16_t bd = cg0, bd0 = 0;
-  int last_st = -1;
-  for (int g = 0; g <= kGbaLines; g++) {
-    int st = g_line_state[row_of[g]];
-    if (st != last_st) {
-      last_st = st;
-      const LineRegs *lr = &g_line_states[st];
-      if (tint)
-        bd = MathOnLine(lr, p) ? lr->fixed_color : 0;
-      else if (bd_math)
-        bd = AddColors(cg0, lr->fixed_color, half, subtract);
+  uint16_t bd = cg0;
+  if (!(g_line_changed & (kLineChanged_Fixed | kLineChanged_Window))) {
+    const LineRegs *lr = &g_line_states[0];
+    if (tint)
+      bd = MathOnLine(lr, p) ? lr->fixed_color : 0;
+    else if (bd_math)
+      bd = AddColors(cg0, lr->fixed_color, half, subtract);
+    if (lt->backdrop[0] != bd || lt->backdrop[kGbaLines] != bd || s_bd_varies[b]) {
+      for (int g = 0; g <= kGbaLines; g++) lt->backdrop[g] = bd;
+      s_bd_varies[b] = false;
     }
-    if (g == 0) bd0 = bd;
-    lt->backdrop[g] = bd;
-    if (bd != bd0) per_line_bd = true;
+  } else {
+    s_bd_varies[b] = true;
+    uint16_t bd0 = 0;
+    const RowSeg *seg = s_segs[0], *seg_end = seg + s_nsegs[0];
+    int last_st = -1;
+    for (; seg < seg_end; seg++) {
+      const uint16_t *idx = g_line_idx + seg->g0 + seg->delta;
+      for (int g = seg->g0; g < seg->g1; g++) {
+        int st = *idx++ & 0xff;
+        if (st != last_st) {
+          last_st = st;
+          const LineRegs *lr = &g_line_states[st];
+          if (tint)
+            bd = MathOnLine(lr, p) ? lr->fixed_color : 0;
+          else if (bd_math)
+            bd = AddColors(cg0, lr->fixed_color, half, subtract);
+          if (g == 0) bd0 = bd;
+          if (bd != bd0) per_line_bd = true;
+        }
+        lt->backdrop[g] = bd;
+      }
+    }
+    lt->backdrop[kGbaLines] = bd;
   }
   fr->backdrop_per_line = per_line_bd;
 
