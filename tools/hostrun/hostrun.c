@@ -32,6 +32,7 @@
 #include "src/snes/dma.h"
 #include "assets/smw_assets.h"
 #include "src/config.h"
+#include "src/util.h"
 
 // Symbols the upstream main.c and config.c provide.
 bool g_debug_flag;

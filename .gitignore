@@ -1,0 +1,8 @@
+# Never commit ROMs or anything built from them.
+*.sfc
+*.smc
+*.gba
+*.sav
+build*/
+third_party/
+out*/
