@@ -718,6 +718,24 @@ void RenderBuildFrame(const ViewMap *vm) {
       }
       continue;
     }
+    if (!bh && !bv) {
+      // A few scroll records (the HUD's split): lines with the previous
+      // line's record and row-line distance get its entry.
+      uint32_t last_key = 0xffffffff, e = 0;
+      for (int g = 0; g <= kGbaLines; g++) {
+        int gl = g < kGbaLines ? g : kGbaLines - 1;
+        int r = rows[g];
+        uint32_t idx = g_line_scroll_state[r];
+        uint32_t key = idx | (uint32_t)(r - gl) << 8;
+        if (key != last_key) {
+          last_key = key;
+          uint32_t v = states[idx * 4];
+          e = (((v & 0x3ff) + vm->xoffset) & 0xffff) | (((v >> 16) + 1 + r - gl) << 16);
+        }
+        col[g * 4] = e;
+      }
+      continue;
+    }
     for (int g = 0; g <= kGbaLines; g++) {
       int gl = g < kGbaLines ? g : kGbaLines - 1;
       int r = rows[g];

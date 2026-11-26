@@ -446,7 +446,11 @@ static void HdmaLoadIndirect(int i) {
   SnesDmaChannel *c = &g_snes->dma[i];
   c->das = HdmaReadTable(i);
   c->das |= HdmaReadTable(i) << 8;
-  s_hdma_ind[i] = SnesPtr(c->dasb << 16 | c->das);
+  // The gradients' data is in low RAM: no need for SnesPtr's bank decoding.
+  if ((c->dasb & 0x7f) < 0x40 && c->das < 0x2000)
+    s_hdma_ind[i] = &g_ram[c->das];
+  else
+    s_hdma_ind[i] = SnesPtr(c->dasb << 16 | c->das);
 }
 
 // Lines are processed per channel only where the channel does something:
