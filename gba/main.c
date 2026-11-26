@@ -86,6 +86,18 @@ static void UpdateView(ViewMap *vm) {
   s_cam = kMaxOffset;
 }
 
+// Waits for the VBlank to present in. If one began since the last present and
+// there's still time left in it, it's used: a frame slightly over budget
+// borrows from the next instead of waiting a whole frame (see the porting
+// guide, section 6).
+static uint32_t s_last_present_vblank;
+static void WaitForVBlank(void) {
+  uint16_t line = REG_VCOUNT;
+  if (g_vblank_count != s_last_present_vblank && line >= 160 && line < 200)
+    return;
+  VBlankIntrWait();
+}
+
 int main(void) {
   REG_WAITCNT = 0x4317;  // ROM 3/1 wait states with prefetch, SRAM 8
   REG_DISPCNT = DCNT_BLANK;
@@ -116,7 +128,8 @@ int main(void) {
     UpdateView(&vm);
     RenderBuildFrame(&vm);
     uint32_t t2 = CycleCount();
-    VBlankIntrWait();
+    WaitForVBlank();
+    s_last_present_vblank = g_vblank_count;
     uint32_t t3 = CycleCount();
     RenderPresent();
     uint32_t t4 = CycleCount();

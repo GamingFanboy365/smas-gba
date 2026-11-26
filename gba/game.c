@@ -68,7 +68,7 @@ void GameRunFrame(uint16_t joy1) {
 }
 
 void GameSyncSram(bool all) {
-  int n = all ? kSramSize : 64;
+  int n = all ? kSramSize : 16;
   uint32_t base = g_game->sram_offset;
   for (int i = 0; i < n; i++) {
     int a = s_sync_pos;

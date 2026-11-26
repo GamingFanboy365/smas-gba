@@ -11,12 +11,16 @@ void IrqDispatch(uint32_t flags) {
     g_vblank_count++;
     AudioVBlank();
   }
+  if (flags & IRQ_VCOUNT)
+    AudioMix();
 }
 
 void IrqInit(void) {
   REG_IME = 0;
-  REG_DISPSTAT = DSTAT_VBL_IRQ;
-  REG_IE = IRQ_VBLANK;
+  // VCount 0, the top of the frame: the mixer (after VBlank, when the frame
+  // has been presented).
+  REG_DISPSTAT = DSTAT_VBL_IRQ | DSTAT_VCT_IRQ | (0 << 8);
+  REG_IE = IRQ_VBLANK | IRQ_VCOUNT;
   REG_IF = 0xffff;
   REG_IME = 1;
 }

@@ -5,5 +5,7 @@ void AudioInit(void);
 void AudioStart(uint32_t spc_tag);
 // Hands the ports the game wrote this frame to the driver.
 void AudioEndFrame(void);
-// Mixes the next frame of sound; called from the VBlank interrupt.
+// Starts the sound DMA on the next buffer; called from the VBlank interrupt.
 void AudioVBlank(void);
+// Mixes the next frame of sound; called from the VCount interrupt.
+void AudioMix(void);

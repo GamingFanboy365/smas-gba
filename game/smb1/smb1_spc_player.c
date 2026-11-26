@@ -6,9 +6,22 @@
 #include <assert.h>
 #include <stddef.h>
 #include "../src/types.h"
+#if defined(SMAS_GBA)
+// This file is built with the integer types aligned as usual (see
+// CMakeLists.txt): its own structs are aligned, and its 16-bit reads of sound
+// RAM, which can be at odd addresses, are made a byte at a time here.
+#undef WORD
+#define WORD(x) ((uint16)((&(x))[0] | (&(x))[1] << 8))
+// On the GBA the DSP is gba/mixer.iwram.c, and the sound RAM is an image in
+// the cartridge, made by tools/spc_image.py with this driver's own writes to
+// it at reset already made; the driver only reads it.
+#include "../src/gba_dsp.h"
+#include <stdio.h>
+#else
 #include "../src/snes/spc.h"
 #include "../src/snes/dsp_regs.h"
 #include "../src/tracing.h"
+#endif
 
 typedef struct Channel {
   uint16 pattern_cur_ptr;
@@ -138,7 +151,11 @@ typedef struct SmasSpcPlayer {
   uint8 var_3F8;
   Channel channel[8];
   uint8 input_ports[4];
+#if defined(SMAS_GBA)
+  uint8 *ram;
+#else
   uint8 ram[65536]; // rest of ram
+#endif
 } SmasSpcPlayer;
 typedef struct MemMap {
   uint16 off, org_off;
@@ -371,7 +388,9 @@ static inline void Chan_DoAnyFade(uint16 *p, uint16 add, uint8 target, uint8 con
 }
 
 static void Spc_Reset(SmasSpcPlayer *p) {
+#if !defined(SMAS_GBA)
   memset(p->ram, 0, 0x500);
+#endif
 
   SmasSpcPlayer_CopyVariablesFromRam(p);
 
@@ -511,7 +530,13 @@ static void WritePitch(SmasSpcPlayer *p, Channel *c, uint16 pitch) {
 }
 
 static void SomeRandomStuff(SmasSpcPlayer *p) {
+#if defined(SMAS_GBA)
+  // The mixer makes this noise sample itself; the blocks go nowhere.
+  static uint8 scratch[0x3f * 4 + 0x40];
+  uint8 *rp = scratch + (--p->somerandomstuff_ctr & 3) * 0x3f;
+#else
   uint8 *rp = p->ram + 0xfe00 + (--p->somerandomstuff_ctr & 3) * 0x3f;
+#endif
   for (int i = 0; i < 7; i++) {
     rp += 1;
     for (int j = 0; j < 4; j++) {
@@ -526,6 +551,7 @@ static void SomeRandomStuff(SmasSpcPlayer *p) {
 }
 
 static void SomeRandomStuff_Init(SmasSpcPlayer *p) {
+#if !defined(SMAS_GBA)
   for (int i = 0; i < 0x1b; i++)
     p->ram[0xfe00 + i * 9] = 0x96;
   p->ram[0xfe00 + 0x1b * 9] = 0x97;
@@ -533,6 +559,7 @@ static void SomeRandomStuff_Init(SmasSpcPlayer *p) {
   p->ram[0x3c81] = 0xfe;
   p->ram[0x3c82] = 0;
   p->ram[0x3c83] = 0xfe;
+#endif
   if (p->lfsr_value == 0)
     p->lfsr_value = 1;
 }
@@ -913,6 +940,7 @@ static void SmasSpcPlayer_Upload(SpcPlayer *p_in, const uint8_t *data) {
   Dsp_Write(p, EVOLR, 0);
   Dsp_Write(p, KOF, 0xff);
 
+#if !defined(SMAS_GBA)
   for (;;) {
     int numbytes = *(uint16 *)(data);
     if (numbytes == 0)
@@ -923,6 +951,7 @@ static void SmasSpcPlayer_Upload(SpcPlayer *p_in, const uint8_t *data) {
       p->ram[target++ & 0xffff] = *data++;
     } while (--numbytes);
   }
+#endif
   p->pause_music_ctr = 0;
   p->base.port_to_snes[0] = 0;
   p->base.port_to_snes[1] = 0;
@@ -1588,6 +1617,30 @@ static void SmasSpcPlayer_Initialize(SpcPlayer *p_in) {
   Spc_Loop_Part1(p);
 }
 
+#if defined(SMAS_GBA)
+// One tick of the driver's timer, every 64 of the DSP's samples (2 ms): what
+// SmasSpcPlayer_GenerateSamples does between DSP samples on the PC.
+void SmasSpcPlayer_Tick(SpcPlayer *p_in) {
+  SmasSpcPlayer *p = (SmasSpcPlayer *)p_in;
+  Spc_Loop_Part2(p, 1);
+  Spc_Loop_Part1(p);
+}
+
+SpcPlayer *SmasSpcPlayer_CreateWithRam(uint8 *ram) {
+  static SmasSpcPlayer player;
+  SmasSpcPlayer *p = &player;
+  memset(p, 0, sizeof(SmasSpcPlayer));
+  p->ram = ram;
+  p->base.dsp = dsp_init(ram);
+  p->base.ram = ram;
+  p->base.initialize = &SmasSpcPlayer_Initialize;
+  p->base.gen_samples = NULL;
+  p->base.upload = &SmasSpcPlayer_Upload;
+  p->base.copy_vars = &SmasSpcPlayer_CopyVariables;
+  p->reg_write_history = 0;
+  return &p->base;
+}
+#else
 static void SmasSpcPlayer_GenerateSamples(SpcPlayer *p_in) {
   SmasSpcPlayer *p = (SmasSpcPlayer *)p_in;
   assert(p->timer_cycles <= 64);
@@ -1615,6 +1668,9 @@ static void SmasSpcPlayer_GenerateSamples(SpcPlayer *p_in) {
   }
 }
 
+#endif  // !SMAS_GBA
+
+#if !defined(SMAS_GBA)
 SpcPlayer *SmasSpcPlayer_Create(void) {
   SmasSpcPlayer *p = (SmasSpcPlayer *)malloc(sizeof(SmasSpcPlayer));
   memset(p, 0, sizeof(SmasSpcPlayer));
@@ -1627,6 +1683,7 @@ SpcPlayer *SmasSpcPlayer_Create(void) {
   p->reg_write_history = 0;
   return &p->base;
 }
+#endif  // !SMAS_GBA
 
 
 // =======================================

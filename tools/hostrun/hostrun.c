@@ -16,6 +16,7 @@
 //           "( ... )xN" repeats a group.
 //   SHOTS   frame numbers: "100,200,300-400/10" (PNG to DIR/fNNNNNN.png)
 //   DUMPS   frame numbers to dump state to DIR/fNNNNNN.dump (see WriteDump)
+//   -a      writes the sound (stereo s16, 32000 Hz) to a raw file.
 //   JOYLOG  a file with one hex SNES joypad word per frame (from the GBA
 //           build's trace); replaces SCRIPT.
 #include <stdio.h>
@@ -205,7 +206,7 @@ int main(int argc, char **argv) {
   }
   const char *rom_path = argv[1];
   int nframes = 600;
-  const char *script = "", *outdir = ".", *joylog = NULL;
+  const char *script = "", *outdir = ".", *joylog = NULL, *audio_path = NULL;
   FrameList shots = { 0 }, dumps = { 0 };
   bool print_hash = false;
   g_runmode = 1;  // RM_MINE
@@ -217,6 +218,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(a, "-d")) dumps = ParseFrames(v), i++;
     else if (!strcmp(a, "-o")) outdir = v, i++;
     else if (!strcmp(a, "-j")) joylog = v, i++;
+    else if (!strcmp(a, "-a")) audio_path = v, i++;
     else if (!strcmp(a, "-H")) print_hash = true;
     else if (!strcmp(a, "-m")) {
       g_runmode = !strcmp(v, "both") ? 0 : !strcmp(v, "theirs") ? 2 : 1;
@@ -240,6 +242,8 @@ int main(int argc, char **argv) {
   PpuBeginDrawing(g_my_ppu, g_my_pixels, 256 * 4, 0);
 
   FILE *jf = joylog ? fopen(joylog, "r") : NULL;
+  FILE *af = audio_path ? fopen(audio_path, "wb") : NULL;
+  static int16 audio_buf[534 * 2];
   if (joylog && !jf) Die("can't open joylog");
 
   int step = 0, step_left = g_nsteps ? g_steps[0].frames : 0;
@@ -256,6 +260,10 @@ int main(int argc, char **argv) {
         step_left = g_steps[step].frames;
     }
     RtlRunFrame(keys);
+    if (af) {
+      RtlRenderAudio(audio_buf, 534, 2);
+      fwrite(audio_buf, 4, 534, af);
+    }
     Ppu *ppu = g_other_image ? g_my_ppu : g_snes->ppu;
     if (g_runmode == 2) ppu = g_snes->ppu;
     if (print_hash)
@@ -269,5 +277,6 @@ int main(int argc, char **argv) {
       WriteDump(path, ppu);
     }
   }
+  if (af) fclose(af);
   return 0;
 }

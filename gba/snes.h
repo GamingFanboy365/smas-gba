@@ -73,8 +73,12 @@ extern uint32_t g_vram_dirty[0x8000 / 16 / 32];
 extern uint16_t g_cgram_dirty;
 extern bool g_oam_dirty;
 
-// The registers of each line of the last frame, filled by SnesRunLines.
-extern LineRegs g_line_regs[kSnesLines];
+// The registers of each line of the last frame, filled by SnesRunLines: the
+// distinct states, in order, and each line's index into them.
+enum { kMaxLineStates = kSnesLines + 1 };
+extern LineRegs g_line_states[kMaxLineStates];
+extern uint8_t g_line_state[kSnesLines];
+extern bool g_line_regs_dirty;
 // Which line registers changed anywhere in the frame: bits of kLineChanged.
 extern uint32_t g_line_changed;
 enum {

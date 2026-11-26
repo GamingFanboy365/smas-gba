@@ -27,9 +27,9 @@ sys.path.insert(0, HERE)
 
 SMAS_SHA1 = 'c05817c5b7df2fbfe631563e0b37237156a8f6b6'
 GAMES = [
-    # tag, delta file, sha1 of the derived image, sound tag
-    ('SMB1', 'smb1.zst', '4a5278150f3395419d68cb02a42f7c3c62cdf8b4', 'SPC1'),
-    ('SMBL', 'smbll.zst', '493e14812af7a92d0eacf00ba8bb6d3a266302ca', 'SPCL'),
+    # tag, delta file, sha1 of the derived image, sound RAM tag, samples tag
+    ('SMB1', 'smb1.zst', '4a5278150f3395419d68cb02a42f7c3c62cdf8b4', 'SPC1', 'PCM1'),
+    ('SMBL', 'smbll.zst', '493e14812af7a92d0eacf00ba8bb6d3a266302ca', 'SPCL', 'PCML'),
 ]
 
 
@@ -40,7 +40,7 @@ def derive_game_roms(smas):
         sys.exit('make_cartridge.py needs the zstandard module: pip install zstandard')
     dict_data = zstandard.ZstdCompressionDict(smas)
     roms = {}
-    for tag, delta, sha1, _ in GAMES:
+    for tag, delta, sha1, _, _ in GAMES:
         with open(os.path.join(HERE, 'data', delta), 'rb') as f:
             out = zstandard.ZstdDecompressor(dict_data=dict_data).decompress(f.read())
         if hashlib.sha1(out).hexdigest() != sha1:
@@ -52,9 +52,11 @@ def derive_game_roms(smas):
 def build_assets(roms):
     import spc_image
     assets = []
-    for tag, _, _, spc_tag in GAMES:
+    for tag, _, _, spc_tag, pcm_tag in GAMES:
+        ram = spc_image.build(roms[tag], tag)
         assets.append((tag, roms[tag]))
-        assets.append((spc_tag, spc_image.build(roms[tag], tag)))
+        assets.append((spc_tag, ram))
+        assets.append((pcm_tag, spc_image.decode_samples(ram)))
     return assets
 
 

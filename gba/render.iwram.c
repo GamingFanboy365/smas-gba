@@ -58,7 +58,7 @@ typedef struct LineTable {
   uint16_t scroll[kGbaLines + 1][8];
   uint16_t backdrop[kGbaLines + 1];
 } __attribute__((aligned(4))) LineTable;
-EWRAM_BSS static LineTable s_tables[2];
+IWRAM_BSS static LineTable s_tables[2];
 static int s_back;
 
 // What RenderPresent puts in the registers.
@@ -396,7 +396,7 @@ void RenderBuildFrame(const ViewMap *vm) {
   SnesPpu *p = &g_snes->ppu;
 
   fr->blank = (p->inidisp & 0x80) != 0;
-  uint8_t tm = g_line_regs[0].tm, ts = g_line_regs[0].ts;
+  uint8_t tm = g_line_states[g_line_state[0]].tm, ts = g_line_states[g_line_state[0]].ts;
   bool sub_add = (p->cgwsel & 2) && (p->cgadsub & 0x20) && !(p->cgadsub & 0x1f);
   uint8_t sub_mask = sub_add ? ts : 0;
 
@@ -436,20 +436,32 @@ void RenderBuildFrame(const ViewMap *vm) {
   for (int k = 0; k < 4; k++) layer_of[k] = k < lp.nbg ? lp.bg_layer[k] : 0;
   uint32_t last_fixed = 0xffffffff;
   uint16_t bd = cg0;
+  int last_key = -1;
+  uint16_t bd0 = 0;
   for (int g = 0; g <= kGbaLines; g++) {
     int gl = g < kGbaLines ? g : kGbaLines - 1;
     bool top = vm->split && gl < vm->split;
     int r = gl + ((top && !vm->hud_overlay) ? vm->top_offset : vm->offset);
     if (r < 0) r = 0;
     if (r >= kSnesLines) r = kSnesLines - 1;
+    uint32_t *s = (uint32_t *)lt->scroll[g];
+    int st = g_line_state[r];
+    // Lines whose state and region are the previous line's get its entry.
+    int key = top ? -2 : st;
+    if (key == last_key && g != kGbaLines) {
+      const uint32_t *prev = (const uint32_t *)lt->scroll[g - 1];
+      s[0] = prev[0], s[1] = prev[1], s[2] = prev[2], s[3] = prev[3];
+      lt->backdrop[g] = bd;
+      continue;
+    }
+    last_key = key;
     // With the HUD overlaid, BG3 alone shows the HUD's rows at the top.
     int rh = r;
     if (top && vm->hud_overlay) {
       rh = gl + vm->top_offset;
       if (rh < 0) rh = 0;
     }
-    const LineRegs *lr = &g_line_regs[r], *lh = &g_line_regs[rh];
-    uint32_t *s = (uint32_t *)lt->scroll[g];
+    const LineRegs *lr = &g_line_states[st], *lh = &g_line_states[g_line_state[rh]];
     for (int k = 0; k < 4; k++) {
       int layer = layer_of[k];
       const LineRegs *l = layer == 2 ? lh : lr;
@@ -460,8 +472,9 @@ void RenderBuildFrame(const ViewMap *vm) {
       last_fixed = lr->fixed_color;
       bd = AddColors(cg0, lr->fixed_color, half, subtract);
     }
+    if (g == 0) bd0 = bd;
     lt->backdrop[g] = bd;
-    if (bd != lt->backdrop[0]) per_line_bd = true;
+    if (bd != bd0) per_line_bd = true;
   }
   fr->backdrop_per_line = per_line_bd;
 

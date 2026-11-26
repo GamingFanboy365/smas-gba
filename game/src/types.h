@@ -20,7 +20,7 @@
 
 typedef uint8_t uint8;
 typedef int8_t int8;
-#if defined(SMAS_GBA)
+#if defined(SMAS_GBA) && !defined(SMAS_GBA_ALIGNED_TYPES)
 // The game reads 16- and 32-bit values from SNES data at any address. The
 // ARM7TDMI doesn't fault on a misaligned load, it rotates the word and
 // returns garbage, so on the GBA these types are 1-byte aligned and the

@@ -4,7 +4,6 @@ project(smas_gba C ASM)
 # The engine: the GBA port with no game data. tools/make_cartridge.py
 # appends the games from the player's own Super Mario All-Stars ROM.
 set(SMAS_TRACE OFF CACHE BOOL "Log the joypad and a RAM hash every frame")
-set(SMAS_AUDIO ON CACHE BOOL "Build the sound driver and mixer")
 
 set(GAME_SRCS
   game/smb1/smb1_00.c game/smb1/smb1_01.c game/smb1/smb1_02.c game/smb1/smb1_08.c
@@ -15,11 +14,7 @@ set(GBA_SRCS
   gba/libc/string.iwram.c gba/libc/misc.c
   gba/main.c gba/irq.c gba/game.c gba/cart.c gba/rtl.c gba/snes_hw.iwram.c
   gba/render.iwram.c)
-if(SMAS_AUDIO)
-  list(APPEND GBA_SRCS gba/audio_stub.c)
-else()
-  list(APPEND GBA_SRCS gba/audio_stub.c)
-endif()
+list(APPEND GBA_SRCS gba/audio.c gba/mixer.iwram.c gba/mixer_asm.S game/smb1/smb1_spc_player.c)
 
 add_executable(smas.elf ${GBA_SRCS} ${GAME_SRCS})
 target_include_directories(smas.elf PRIVATE gba/libc/include)
@@ -32,6 +27,10 @@ target_compile_options(smas.elf PRIVATE
   -Wall -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unknown-pragmas
   -Wno-parentheses -Wno-unused-function -Wno-missing-braces -Wno-pointer-sign
   -Wno-char-subscripts -Wno-unused-value -Wno-misleading-indentation>)
+
+# The sound driver's own structs are aligned; see smb1_spc_player.c.
+set_source_files_properties(game/smb1/smb1_spc_player.c PROPERTIES
+  COMPILE_DEFINITIONS SMAS_GBA_ALIGNED_TYPES=1)
 
 # Thumb for everything in ROM, ARM for the hot code in IWRAM (*.iwram.c).
 foreach(src ${GBA_SRCS} ${GAME_SRCS})
