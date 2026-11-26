@@ -9,3 +9,5 @@ void AudioEndFrame(void);
 void AudioVBlank(void);
 // Mixes the next frame of sound; called from the VCount interrupt.
 void AudioMix(void);
+// Stops the sound (back to the game select).
+void AudioStop(void);

@@ -16,6 +16,8 @@
 //   -w      FRAME:ADDR=VAL[,...] (hex ADDR and VAL): pokes the game's RAM
 //           (g_ram, at the address given with -r) before game frame FRAME
 //           starts; needs -f.
+//   -K      a script for the GBA frames before the game starts (the game
+//           select), by GBA frame; with -f, -k then starts with the game.
 //   -p      FROM-TO: profiles those frames by stepping the CPU, and writes
 //           "address cycles" lines to DIR/profile.txt (tools/profile.py
 //           sums them by function).
@@ -172,7 +174,7 @@ int main(int argc, char **argv) {
     return 1;
   }
   int nframes = 600;
-  const char *script = "", *outdir = ".", *audio_path = NULL;
+  const char *script = "", *outdir = ".", *audio_path = NULL, *menu_script = NULL;
   FrameList shots = { 0 };
   MemDump dumps[16];
   int ndumps = 0;
@@ -184,6 +186,7 @@ int main(int argc, char **argv) {
     const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : "";
     if (!strcmp(a, "-n")) nframes = atoi(v), i++;
     else if (!strcmp(a, "-k")) script = v, i++;
+    else if (!strcmp(a, "-K")) menu_script = v, i++;
     else if (!strcmp(a, "-s")) ParseFramesInto(&shots, v), i++;
     else if (!strcmp(a, "-o")) outdir = v, i++;
     else if (!strcmp(a, "-a")) audio_path = v, i++;
@@ -208,6 +211,14 @@ int main(int argc, char **argv) {
       ndumps++, i++;
     } else { fprintf(stderr, "bad arg %s\n", a); return 1; }
   }
+  // The menu's script first, then the game's; the game's starts at
+  // menu_steps.
+  int menu_steps = 0, menu_frames = 0;
+  if (menu_script) {
+    ParseScript(menu_script, 0);
+    menu_steps = g_nsteps;
+    for (int i = 0; i < g_nsteps; i++) menu_frames += g_steps[i].frames;
+  }
   ParseScript(script, 0);
 
   mLogSetDefaultLogger(&g_logger);
@@ -230,11 +241,20 @@ int main(int argc, char **argv) {
   int16_t abuf[4096 * 2];
   char path[512];
   int step = 0, left = g_nsteps ? g_steps[0].frames : 0;
+  int mstep = 0, mleft = menu_steps ? g_steps[0].frames : 0;
+  if (frame_addr && menu_steps) {
+    step = menu_steps;
+    left = step < g_nsteps ? g_steps[step].frames : 0;
+  }
   uint32_t script_pos = 0;  // game frames the script has been advanced by
   int next_shot = 0;
   for (g_frame = 0; g_frame < nframes; g_frame++) {
     uint32_t keys = 0;
-    if (frame_addr) {
+    if (frame_addr && core->busRead32(core, frame_addr) == 0 && mstep < menu_steps) {
+      // Before the game: the menu's script, by GBA frame.
+      keys = g_steps[mstep].keys;
+      if (--mleft <= 0 && ++mstep < menu_steps) mleft = g_steps[mstep].frames;
+    } else if (frame_addr) {
       // Keys for the next game frame to start.
       uint32_t gf = core->busRead32(core, frame_addr);
       while (script_pos < gf) {

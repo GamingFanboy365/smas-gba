@@ -9,6 +9,7 @@
 #include "game.h"
 #include "audio.h"
 #include "irq.h"
+#include "menu.h"
 
 // SMB1's RAM (the same addresses in both games).
 #define RAM8(a) (g_ram[a])
@@ -100,30 +101,22 @@ static void WaitForVBlank(void) {
   VBlankIntrWait();
 }
 
-int main(void) {
-  REG_WAITCNT = 0x4317;  // ROM 3/1 wait states with prefetch, SRAM 8
-  REG_DISPCNT = DCNT_BLANK;
-  // Timers 2 and 3: a cycle counter.
-  REG_TM_CNT_H(2) = 0;
-  REG_TM_CNT_H(3) = 0;
-  REG_TM_CNT_L(2) = 0;
-  REG_TM_CNT_L(3) = 0;
-  REG_TM_CNT_H(3) = 0x84;
-  REG_TM_CNT_H(2) = 0x80;
+// A, B, Select and Start together: back to the game select, as a soft reset.
+static bool SoftResetHeld(void) {
+  uint16_t k = ~REG_KEYINPUT & (KEY_A | KEY_B | KEY_SELECT | KEY_START);
+  return k == (KEY_A | KEY_B | KEY_SELECT | KEY_START);
+}
 
-  IrqInit();
-  RenderInit();
-  AudioInit();
-  printf("smas-gba: start");
-
-  // Holding L at power-on starts The Lost Levels (until the menu exists).
-  const GameDef *game = &kGames[(~REG_KEYINPUT & KEY_L) ? 1 : 0];
-  GameStart(game);
-
+static void RunGame(void) {
   ViewMap vm;
   uint32_t frames = 0, vb_start = g_vblank_count;
   uint32_t t_game = 0, t_build = 0, t_present = 0;
   for (;;) {
+    if (SoftResetHeld()) {
+      GameSyncSram(true);
+      AudioStop();
+      return;
+    }
     uint32_t t0 = CycleCount();
     GameRunFrame(ReadJoypad());
     uint32_t t1 = CycleCount();
@@ -144,5 +137,30 @@ int main(void) {
       frames = 0, vb_start = g_vblank_count;
       t_game = t_build = t_present = 0;
     }
+  }
+}
+
+int main(void) {
+  REG_WAITCNT = 0x4317;  // ROM 3/1 wait states with prefetch, SRAM 8
+  REG_DISPCNT = DCNT_BLANK;
+  // Timers 2 and 3: a cycle counter.
+  REG_TM_CNT_H(2) = 0;
+  REG_TM_CNT_H(3) = 0;
+  REG_TM_CNT_L(2) = 0;
+  REG_TM_CNT_L(3) = 0;
+  REG_TM_CNT_H(3) = 0x84;
+  REG_TM_CNT_H(2) = 0x80;
+
+  IrqInit();
+  RenderInit();
+  AudioInit();
+  printf("smas-gba: start");
+
+  for (;;) {
+    int choice = MenuRun();
+    RenderInit();
+    GameStart(&kGames[choice]);
+    s_cam = kMaxOffset;
+    RunGame();
   }
 }

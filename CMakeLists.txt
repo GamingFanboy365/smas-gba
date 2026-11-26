@@ -12,7 +12,7 @@ set(GAME_SRCS
 set(GBA_SRCS
   gba/crt0.S gba/aeabi.S
   gba/libc/string.iwram.c gba/libc/misc.c
-  gba/main.c gba/irq.c gba/game.c gba/cart.c gba/rtl.c gba/snes_hw.iwram.c
+  gba/main.c gba/menu.c gba/irq.c gba/game.c gba/cart.c gba/rtl.c gba/snes_hw.iwram.c
   gba/render.iwram.c)
 list(APPEND GBA_SRCS gba/audio.c gba/mixer.iwram.c gba/mixer_asm.S game/smb1/smb1_spc_player.c)
 

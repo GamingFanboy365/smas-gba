@@ -131,6 +131,15 @@ void AudioStart(uint32_t spc_tag) {
   s_started = true;
 }
 
+void AudioStop(void) {
+  REG_IME = 0;
+  s_started = false;
+  s_q_head = s_q_count = 0;
+  REG_IME = 1;
+  s_player = NULL;
+  memset(s_out, 0, sizeof(s_out));
+}
+
 void AudioEndFrame(void) {
   if (!s_player) return;
   memcpy(s_player->input_ports, s_pending_ports, 4);
