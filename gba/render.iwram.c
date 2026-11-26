@@ -35,6 +35,7 @@ enum {
   kSolidTile3 = 190,     // all color 15: the tint layer's tile
   kBlankTile3 = 191,
   kTintSb = 19,          // the tint layer's map, after BG3's 192 tiles
+  kTitleCursorTile = 0x22e, kTitleBlankTile = 0x024,
   kSbBase = 20,          // first screenblock of the maps
   kGbaLines = 160,
 };
@@ -160,6 +161,18 @@ static void ConvertMapChunk(int layer, uint32_t i, const uint16_t *src) {
   }
   s_prio_rows[layer][row] += delta;
   s_prio_total[layer] += delta;
+  // The title menu's cursor (BG1 tile 0x22e, right against the text on the
+  // SNES) one column further left, for some room between it and the text.
+  if (layer == 0 && s_tiles_squashed == kSquashTitle) {
+    // (The entry to the left can be the previous chunk's last, not at a
+    // map row's start.)
+    for (int k = (i & 31) ? 0 : 1; k < 16; k++) {
+      if ((src[k] & 0x3ff) == kTitleCursorTile && (src[k - 1] & 0x3ff) == kTitleBlankTile) {
+        full[k - 1] = MapEntry(src[k], 0);
+        full[k] = MapEntry(src[k - 1], 0);
+      }
+    }
+  }
 }
 
 static inline bool InRange(uint32_t a, uint32_t base, uint32_t size) {
@@ -730,6 +743,9 @@ void RenderPresent(void) {
     // Only BG1/BG2's tiles are converted differently.
     s_tiles_squashed = fr->squash;
     for (uint32_t a = s_bg12_base; a < (uint32_t)s_bg12_base + 0x4000; a += 16)
+      g_vram_dirty[(a & 0x7fff) >> 9] |= 1u << ((a >> 4) & 31);
+    // And BG1's map (the title's cursor).
+    for (uint32_t a = s_map_base[0]; a < (uint32_t)s_map_base[0] + 0x800; a += 16)
       g_vram_dirty[(a & 0x7fff) >> 9] |= 1u << ((a >> 4) & 31);
   }
   ConvertDirtyVram();
