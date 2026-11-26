@@ -66,6 +66,7 @@ static void UpdateView(ViewMap *vm) {
   vm->xoffset = 8;
   vm->hud_overlay = false;
   vm->squash = kSquashNone;
+  vm->menu_offset = 0;
   uint8_t mode = RAM8(kRam_GameMode), task = RAM8(kRam_GameModeTask);
   int want = mode == 0 ? kViewTitle
            : ((mode == 1 && task >= 3) || mode == 2) ? kViewLevel : kViewBetween;
@@ -89,11 +90,12 @@ static void UpdateView(ViewMap *vm) {
     int head = y + (RAM8(kRam_PlayerSize) ? 16 : 0);
     int target = kMaxOffset;
     if (head - target < kHeadroom) target = head - kHeadroom;
-    // The pause menu's box (SNES rows 64-135) clear of the HUD.
-    if (RAM8(kRam_PauseMenu) & 1) target = 40;
     // Below the overlaid HUD the level shows rows from offset + 16; above
     // row 32, BG3 is the SNES's own HUD, which would show twice.
     if (target < 32 - kOverlayLines) target = 32 - kOverlayLines;
+    // The pause menu's box (SNES rows 64-143) is shown in the middle of the
+    // screen (lines 40-119); the level stays put.
+    if (RAM8(kRam_PauseMenu) & 1) vm->menu_offset = 24;
     // Ease toward it: up quickly (Mario can move 5 lines a frame), down slowly.
     if (target < s_cam) s_cam -= (s_cam - target > 6) ? 6 : s_cam - target;
     else if (target > s_cam) s_cam += (target - s_cam > 3) ? 3 : target - s_cam;

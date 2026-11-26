@@ -3,11 +3,13 @@
 @
 @ int MixNearest(MixJob *job, int32_t *mix, int count)
 @ int MixLinear(MixJob *job, int32_t *mix, int count)
-@   job: { const int16_t *pcm; uint32_t pos, step, end, loop_back; int32_t gl, gr; }
+@   job: { const int16_t *pcm; uint32_t pos, step, end, loop_back;
+@          int32_t gl, gr, dgl, dgr; }
 @   pos, step, end and loop_back are 16.16 sample positions. At the end the
 @   position goes back by loop_back, or, for a sample that ends (loop_back
-@   0), the loop stops and returns 0. Otherwise returns 1. job->pos is
-@   written back.
+@   0), the loop stops and returns 0. Otherwise returns 1. The volumes gl,
+@   gr step by dgl, dgr after every sample (the envelope's glide from one
+@   chunk's value to the next). job->pos is written back.
 
   .syntax unified
   .section .iwram.mixer, "ax", %progbits
@@ -19,6 +21,9 @@
 MixNearest:
   stmfd sp!, {r4-r11, lr}
   ldmia r0, {r3, r4, r5, r6, r7, r8, r12}  @ pcm pos step end loop_back gl gr
+  ldr   lr, [r0, #28]                      @ dgl
+  str   r0, [sp, #-4]!
+  ldr   r0, [r0, #32]                      @ dgr
 6:
   @ Four samples at once when the sample's end isn't within them.
   cmp   r2, #4
@@ -35,6 +40,8 @@ MixNearest:
   mla   r11, r9, r12, r11
   stmia r1!, {r10, r11}
   add   r4, r4, r5
+  add   r8, r8, lr
+  add   r12, r12, r0
   .endr
   subs  r2, r2, #4
   bne   6b
@@ -48,12 +55,15 @@ MixNearest:
   mla   r11, r9, r12, r11
   stmia r1!, {r10, r11}
   add   r4, r4, r5
+  add   r8, r8, lr
+  add   r12, r12, r0
   cmp   r4, r6
   bhs   3f
 2:
   subs  r2, r2, #1
   bne   6b
 7:
+  ldr   r0, [sp], #4
   str   r4, [r0, #4]
   mov   r0, #1
   ldmfd sp!, {r4-r11, lr}
@@ -67,6 +77,7 @@ MixNearest:
   bhs   5b
   b     2b
 4:
+  ldr   r0, [sp], #4
   str   r4, [r0, #4]
   mov   r0, #0
   ldmfd sp!, {r4-r11, lr}
@@ -77,6 +88,8 @@ MixNearest:
 MixLinear:
   stmfd sp!, {r4-r11, lr}
   ldmia r0, {r3, r4, r5, r6, r7, r8, r12}
+  ldr   lr, [r0, #28]                      @ dgl
+  ldr   r7, [r0, #32]                      @ dgr (loop_back read again at the end)
   str   r0, [sp, #-4]!
 1:
   mov   r9, r4, lsr #16
@@ -92,6 +105,8 @@ MixLinear:
   mla   r10, r9, r8, r10
   mla   r11, r9, r12, r11
   stmia r1!, {r10, r11}
+  add   r8, r8, lr
+  add   r12, r12, r7
   add   r4, r4, r5
   cmp   r4, r6
   bhs   3f
@@ -104,10 +119,12 @@ MixLinear:
   ldmfd sp!, {r4-r11, lr}
   bx    lr
 3:
-  cmp   r7, #0
+  ldr   r9, [sp]
+  ldr   r9, [r9, #16]                @ loop_back
+  cmp   r9, #0
   beq   4f
 5:
-  sub   r4, r4, r7
+  sub   r4, r4, r9
   cmp   r4, r6
   bhs   5b
   b     2b

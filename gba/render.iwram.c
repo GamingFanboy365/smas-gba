@@ -76,6 +76,13 @@ typedef struct FrameRegs {
   uint8_t pal_bright;     // the brightness the palettes are to be at
   uint8_t split_line;     // BG0's priority changes above this line (0: no)
   uint16_t bgcnt0_bottom; // to this
+  // Above the split, BG0 being the HUD, the level's BG3 (the clouds behind
+  // it) is shown by another GBA BG, cloud_bg (0: none), with these registers;
+  // from the split on, that BG goes back to bgcnt[cloud_bg] and dispcnt.
+  // Its first cloud_hide lines (rows the SNES covers with its own HUD) are
+  // left out by window 0.
+  uint8_t cloud_bg, cloud_hide;
+  uint16_t cloud_bgcnt, cloud_dispcnt;
 } FrameRegs;
 static FrameRegs s_regs[2];
 // The frame on screen, for RenderVBlank: its line table (NULL: none), where
@@ -85,6 +92,8 @@ static volatile uint16_t *s_front_color;
 static bool s_front_per_line;
 static uint8_t s_front_split;            // see FrameRegs
 static uint16_t s_front_bgcnt0[2];       // above the split, from it on
+static uint8_t s_front_cloud_bg;         // see FrameRegs
+static uint16_t s_front_cloud_cnt[2], s_front_dispcnt[2];
 EWRAM_BSS static uint16_t s_oam[2][512] __attribute__((aligned(4)));
 static bool s_oam_ready[2];
 
@@ -669,6 +678,9 @@ __attribute__((noinline)) static void BuildOam(uint16_t *out, const ViewMap *vm,
     if (y + h > 256) y -= 256;  // wraps to the top
     // Which region of the view it falls in, by its top line.
     int gy = y - vm->offset;
+    // The pause menu's: attributes 0x21, tiles 0x1c0-0x1ff.
+    if (vm->menu_offset && o[3] == 0x21 && o[2] >= 0xc0)
+      gy = y - vm->menu_offset;
     if (vm->squash)
       gy = y - s_shift[i];
     else if (vm->split && !vm->hud_overlay && y < vm->split + vm->top_offset)
@@ -732,6 +744,37 @@ ROM_CODE static void BuildSegs(const ViewMap *vm) {
       }
     }
     s_nsegs[which] = n;
+  }
+}
+
+// The clouds behind the HUD (with the HUD split): the level's BG3 shown,
+// above the split, on a BG the plan leaves free, else on one showing a
+// layer's priority tiles apart (above the split its full map still shows
+// them, only no longer in front of the sprites). Returns the BG (0: none)
+// and, in *hide, how many of the top lines are rows the SNES covers with its
+// own HUD (its rows 0-31), to be left out.
+ROM_CODE static int PlanClouds(const LayerPlan *lp, int k0, const ViewMap *vm, uint8_t *hide) {
+  int cb = 0;
+  if (k0 + lp->nbg < 4) {
+    cb = k0 + lp->nbg;
+  } else {
+    for (int k = lp->nbg - 1; k >= 0; k--)
+      if (lp->bg_hi[k] && (!cb || lp->bg_layer[k] == 0)) cb = k + k0;
+  }
+  int h = 32 - vm->offset;
+  *hide = h < 0 ? 0 : h > vm->split ? vm->split : h;
+  return cb;
+}
+
+// Its scroll above the split: BG3's for the level's rows.
+ROM_CODE static void FillCloudScroll(LineTable *lt, int k, const ViewMap *vm) {
+  uint32_t *col = (uint32_t *)lt->scroll + k;
+  const uint32_t *states = &g_scroll_states[0][2];
+  for (int g = 0; g < vm->split; g++) {
+    int r = g + vm->offset;
+    if (r >= kSnesLines) r = kSnesLines - 1;
+    uint32_t v = states[g_line_scroll_of(r) * 4];
+    col[g * 4] = (((v & 0x3ff) + vm->xoffset) & 0xffff) | (((v >> 16) + 1 + r - g) << 16);
   }
 }
 
@@ -836,6 +879,8 @@ void RenderBuildFrame(const ViewMap *vm) {
     layer_of[0] = 2;
     dispcnt |= DCNT_BG0;
   }
+  fr->cloud_bg = hud_split ? PlanClouds(&lp, k0, vm, &fr->cloud_hide) : 0;
+  fr->cloud_bgcnt = fr->bgcnt0_bottom;
   for (int k = 0; k < lp.nbg; k++) {
     int layer = lp.bg_layer[k];
     int sb = lp.bg_hi[k] ? SbHi(layer) : SbFull(layer);
@@ -849,6 +894,10 @@ void RenderBuildFrame(const ViewMap *vm) {
   }
   if (!(tm & 0x10)) dispcnt &= ~DCNT_OBJ;
   fr->dispcnt = dispcnt;
+  if (fr->cloud_bg) {
+    fr->cloud_dispcnt = dispcnt | (DCNT_BG0 << fr->cloud_bg);
+    if (fr->cloud_hide) fr->cloud_dispcnt |= DCNT_WIN0;
+  }
   int msz = p->mosaic >> 4;
   fr->mosaic = msz | msz << 4 | msz << 8 | msz << 12;
 
@@ -939,6 +988,11 @@ void RenderBuildFrame(const ViewMap *vm) {
         col[g * 4] = ((h + xoff) & 0xffff) | ((w + 1 + delta) << 16);
       }
     }
+  }
+  if (fr->cloud_bg) {
+    // Filled whole again next time: its top isn't what its kind of fill left.
+    s_col_ver[b][fr->cloud_bg] = 0;
+    FillCloudScroll(lt, fr->cloud_bg, vm);
   }
   // Line kGbaLines (for the HBlank after the last line) repeats it.
   {
@@ -1039,6 +1093,17 @@ ROM_CODE void RenderPresent(void) {
   s_front_split = fr->split_line;
   s_front_bgcnt0[0] = fr->bgcnt[0];
   s_front_bgcnt0[1] = fr->bgcnt0_bottom;
+  s_front_cloud_bg = fr->cloud_bg;
+  if (fr->cloud_bg) {
+    s_front_cloud_cnt[0] = fr->cloud_bgcnt;
+    s_front_cloud_cnt[1] = fr->bgcnt[fr->cloud_bg];
+    s_front_dispcnt[0] = fr->cloud_dispcnt;
+    s_front_dispcnt[1] = fr->dispcnt;
+    REG_WIN0H = 240;
+    REG_WIN0V = fr->cloud_hide;
+    REG_WININ = 0x3f & ~(1 << fr->cloud_bg);
+    REG_WINOUT = 0x3f;
+  }
   s_front = lt;
   RenderVBlank();
 }
@@ -1056,6 +1121,10 @@ void RenderVBlank(void) {
   REG_DISPSTAT = (REG_DISPSTAT & 0xff) | vline << 8;
   if (!lt) return;
   if (s_front_split) REG_BGCNT(0) = s_front_bgcnt0[0];
+  if (s_front_cloud_bg) {
+    REG_BGCNT(s_front_cloud_bg) = s_front_cloud_cnt[0];
+    REG_DISPCNT = s_front_dispcnt[0];
+  }
   REG_DMA_CNT(0) = 0;
   volatile uint32_t *scroll_regs = (volatile uint32_t *)0x04000010;
   const uint32_t *line0 = (const uint32_t *)lt->scroll[0];
@@ -1074,11 +1143,15 @@ void RenderVBlank(void) {
 
 // From the VCount interrupt, on the line before the split: once that line
 // is drawn (its HBlank), BG0 takes its priority for the lines from the
-// split on.
+// split on, and the clouds' BG goes back to what it shows there.
 void RenderMidFrame(void) {
   if (!s_front || !s_front_split) return;
   while (!(REG_DISPSTAT & 2)) {}
   REG_BGCNT(0) = s_front_bgcnt0[1];
+  if (s_front_cloud_bg) {
+    REG_BGCNT(s_front_cloud_bg) = s_front_cloud_cnt[1];
+    REG_DISPCNT = s_front_dispcnt[1];
+  }
 }
 
 // Stops the per-line registers (leaving for the game select).

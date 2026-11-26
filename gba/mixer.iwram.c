@@ -8,6 +8,10 @@
 // them (reference: snesrev's LakeSnes dsp.c), except:
 //   - samples are stepped through at the mixer's rate with linear
 //     interpolation instead of the DSP's Gaussian one;
+//   - the envelope is stepped once a chunk, and each voice's volume glides
+//     from one chunk's value to the next over the chunk's samples (as the
+//     DSP's, stepped at 32 kHz, nearly does), so that a note's release or
+//     decay doesn't click; a voice fades out to silence before it's left;
 //   - no echo, no pitch modulation;
 //   - the sample the driver rewrites with random data at run time
 //     (SomeRandomStuff, directory entry 0x20) is made here, from the
@@ -43,6 +47,7 @@ typedef struct Voice {
   int8_t vol_l, vol_r;
   uint16_t pitch, counter;
   int32_t env, lp_old;
+  int32_t gl_last, gr_last;  // its volumes at the end of the last chunk mixed
 } Voice;
 
 typedef struct MixerState {
@@ -62,7 +67,7 @@ static int32_t s_mix[kMixSamplesPerFrame * 2];
 typedef struct MixJob {
   const int16_t *pcm;
   uint32_t pos, step, end, loop_back;
-  int32_t gl, gr;
+  int32_t gl, gr, dgl, dgr;
 } MixJob;
 int MixNearest(MixJob *job, int32_t *mix, int count);  // mixer_asm.S
 int MixLinear(MixJob *job, int32_t *mix, int count);
@@ -88,7 +93,10 @@ ROM_CODE static void KeyOn(Voice *v) {
   v->end = e->length << 16;
   v->loop_back = e->loop == 0xffffffff ? 0 : (e->length - e->loop) << 16;
   v->lp_old = 0;
+  // A key on cuts the voice's last note, as on the DSP; the new one glides
+  // in from silence.
   v->env = 0;
+  v->gl_last = v->gr_last = 0;
   v->counter = 0;
   v->state = (v->adsr1 & 0x80) ? kAttack : kGain;
   v->on = true;
@@ -194,22 +202,26 @@ static void EnvAdvance(Voice *v, int n) {
 
 // ---- mixing ----
 
-static void MixVoice(Voice *v, int32_t *mix, int count, const int16_t *noise) {
-  int32_t gl = (v->env * v->vol_l) >> 7, gr = (v->env * v->vol_r) >> 7;
+// The noise voices: the DSP's noise, or the sample the driver fills with
+// random data (rare: some sound effects). Thumb code in ROM.
+ROM_CODE static void MixNoiseVoice(Voice *v, int32_t *mix, int count, const int16_t *noise,
+                                   int32_t gl, int32_t gr, int32_t dgl, int32_t dgr) {
+  uint32_t pos = v->pos, step = v->step;
   if (v->noise_src) {
     for (int i = 0; i < count; i++) {
       int32_t s = noise[i];
       mix[i * 2] += s * gl, mix[i * 2 + 1] += s * gr;
+      gl += dgl, gr += dgr;
     }
     return;
   }
-  uint32_t pos = v->pos, step = v->step;
   if (v->lp_noise) {
     // Random BRR blocks, shift 9, filter 1: 4-bit noise through a one-pole
     // filter, a new value per sample at the voice's pitch.
     int32_t old = v->lp_old;
     for (int i = 0; i < count; i++) {
       mix[i * 2] += old * gl, mix[i * 2 + 1] += old * gr;
+      gl += dgl, gr += dgr;
       uint32_t np = pos + step;
       for (uint32_t k = (np >> 16) - (pos >> 16); k; k--) {
         int32_t r = ((noise[i] >> 10) | 1) << 8;
@@ -223,14 +235,42 @@ static void MixVoice(Voice *v, int32_t *mix, int count, const int16_t *noise) {
     v->pos = pos;
     return;
   }
-  MixJob job = { v->pcm, pos, step, v->end, v->loop_back, gl, gr };
+}
+
+// 65536 / n, for a glide's step a sample.
+static const uint16_t kRecip[kChunk + 1] = {
+  0, 65535, 32768, 21845, 16384, 13107, 10923, 9362, 8192, 7282, 6554, 5958,
+  5461, 5041, 4681, 4369, 4096, 3855, 3641, 3449, 3277, 3121, 2979, 2849,
+  2731, 2621, 2521, 2427, 2341, 2260, 2185, 2114, 2048,
+};
+
+// Mixes count samples of a voice, its volumes gliding from where the last
+// chunk left them to its envelope's and volume registers' (0 if it's off).
+static void MixVoice(Voice *v, int32_t *mix, int count, const int16_t *noise) {
+  int32_t tl = 0, tr = 0;
+  if (v->on) tl = (v->env * v->vol_l) >> 7, tr = (v->env * v->vol_r) >> 7;
+  int32_t gl = v->gl_last, gr = v->gr_last;
+  int32_t dgl = ((tl - gl) * kRecip[count]) >> 16, dgr = ((tr - gr) * kRecip[count]) >> 16;
+  v->gl_last = gl + dgl * count, v->gr_last = gr + dgr * count;
+  if (!v->on) {
+    // Faded out: what's left of the glide's rounding goes too.
+    v->gl_last = v->gr_last = 0;
+  }
+  if (v->noise_src || v->lp_noise) {
+    MixNoiseVoice(v, mix, count, noise, gl, gr, dgl, dgr);
+    return;
+  }
+  uint32_t pos = v->pos, step = v->step;
+  MixJob job = { v->pcm, pos, step, v->end, v->loop_back, gl, gr, dgl, dgr };
   // Stepping over samples, interpolating buys nothing; well below the
   // mixer's rate (under half), it keeps the steps from buzzing.
   int alive = step >= 0x8000 ? MixNearest(&job, mix, count) : MixLinear(&job, mix, count);
   v->pos = job.pos;
   if (!alive) {
+    // The sample's own end: it's silent from there.
     v->on = false;
     v->env = 0;
+    v->gl_last = v->gr_last = 0;
   }
 }
 
@@ -274,9 +314,10 @@ void MixerRun(int from, int to) {
     if (need_noise) MakeNoise(noise, count, (kDspPerOut + 0x8000) >> 16);
     for (int k = 0; k < 8; k++) {
       Voice *v = &d->v[k];
-      if (!v->on) continue;
-      EnvAdvance(v, ticks);
-      if (!v->on || v->env == 0 || (v->vol_l == 0 && v->vol_r == 0)) {
+      bool fading = v->gl_last || v->gr_last;
+      if (!v->on && !fading) continue;
+      if (v->on) EnvAdvance(v, ticks);
+      if (!fading && (!v->on || v->env == 0 || (v->vol_l == 0 && v->vol_r == 0))) {
         // Silent: keep its place in the sample without mixing it.
         if (v->on && !v->noise_src && !v->lp_noise) {
           v->pos += v->step * count;
@@ -303,9 +344,11 @@ void MixerOutput(int8_t *left, int8_t *right) {
   for (int i = 0; i < kMixSamplesPerFrame; i++) {
     // The voices' sum is the DSP's at << 10; the master volume is >> 7; the
     // 8-bit output is the 16-bit one >> 8.
-    // 1.5x: the 8-bit output has headroom to spare, and no echo adds to it.
-    int32_t l = (((s_mix[i * 2] >> 10) * ml) * 3) >> 16;
-    int32_t r = (((s_mix[i * 2 + 1] >> 10) * mr) * 3) >> 16;
+    // 2x: the 8-bit output has headroom to spare (the loudest sound effects
+    // peak at about 125), and no echo adds to it; the more of the 8 bits the
+    // music uses, the less their steps are heard.
+    int32_t l = ((s_mix[i * 2] >> 10) * ml) >> 14;
+    int32_t r = ((s_mix[i * 2 + 1] >> 10) * mr) >> 14;
     if (l > 127) l = 127; else if (l < -128) l = -128;
     if (r > 127) r = 127; else if (r < -128) r = -128;
     left[i] = l, right[i] = r;

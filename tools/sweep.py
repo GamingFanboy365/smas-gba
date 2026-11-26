@@ -10,8 +10,10 @@ run gets somewhere) goes through tools/hostrun and tools/mgba/smrun, with a
 picture every 50 game frames. Each GBA picture is compared with the
 reference's 240 middle columns at the vertical offset that fits best, below
 the HUD (lines 18-159); squashed screens (the cards between levels) and
-blank frames are left out. The summary lists, per run, the worst share of
-differing pixels, and the speed: the 60-frame windows that took more than
+blank frames are left out. The lines behind the HUD (0-16) are compared at
+that offset too, leaving out the HUD's own pixels (those that match the
+reference's HUD rows, 14-30). The summary lists, per run, the worst share
+of differing pixels below the HUD and behind it, and the speed: the 60-frame windows that took more than
 61 VBlanks once the level is under way, and the heaviest window's cycles a
 frame ("slow": long and heavy windows; "loads": long but light ones, a
 level's load or a death in them). Side-by-side pictures of each run's worst frame go to OUT/worst/.
@@ -85,7 +87,8 @@ def run_one(args, game, world, level, halfway):
 
 
 def compare(ref_path, gba_path):
-    """Returns (share of differing pixels, offset), or None for frames left out."""
+    """Returns (share of differing pixels, offset, share behind the HUD), or
+    None for frames left out."""
     ref = np.asarray(Image.open(ref_path).convert('RGB'), dtype=np.int16)[:, 8:248]
     gba = np.asarray(Image.open(gba_path).convert('RGB'), dtype=np.int16)
     if gba.max() < 16 or ref.max() < 16:
@@ -97,7 +100,11 @@ def compare(ref_path, gba_path):
         share = diff.mean()
         if best is None or share < best[0]:
             best = (share, off)
-    return best
+    off = best[1]
+    top, level, hud = gba[0:17], ref[off:off + 17], ref[14:31]
+    differs = np.abs(top - level).max(axis=2) > 12
+    is_hud = (np.abs(top - hud).max(axis=2) <= 12) & (np.abs(hud - level).max(axis=2) > 12)
+    return best[0], off, (differs & ~is_hud).mean()
 
 
 def analyze(tag, d, log, worst_dir):
@@ -111,16 +118,18 @@ def analyze(tag, d, log, worst_dir):
         r = compare(os.path.join(d, name), g)
         if r is None:
             continue
-        shares.append((r[0], r[1], name))
+        shares.append((r[0], r[1], name, r[2]))
     # Squashed screens don't fit at any offset: a card between levels has a
     # mostly black reference. Leave out frames whose reference is that.
     kept = []
-    for share, off, name in shares:
+    for share, off, name, strip in shares:
         ref = np.asarray(Image.open(os.path.join(d, name)).convert('RGB'))
         if (ref.max(axis=2) < 48).mean() > 0.6:
             continue
-        kept.append((share, off, name))
-    worst = max(kept) if kept else (0.0, 0, None)
+        kept.append((share, off, name, strip))
+    worst = max(kept) if kept else (0.0, 0, None, 0.0)
+    # Behind the HUD: only frames that fit well below it say anything.
+    strip = max((k[3] for k in kept if k[0] < 0.02), default=0.0)
     if worst[2]:
         ref = Image.open(os.path.join(d, worst[2])).convert('RGB')
         gba = Image.open(os.path.join(d, 'g' + worst[2][1:])).convert('RGB')
@@ -138,7 +147,7 @@ def analyze(tag, d, log, worst_dir):
     slow = sum(1 for v, c in play if v > 61 and c > 262000)
     loads = sum(1 for v, c in play if v > 61 and c <= 262000)
     heavy = max((c for _, c in play), default=0)
-    return tag, len(kept), worst[0], worst[2], len(play), slow, loads, heavy
+    return tag, len(kept), worst[0], worst[2], strip, len(play), slow, loads, heavy
 
 
 def main():
@@ -172,9 +181,9 @@ def main():
         for f in futs:
             tag, d, log = f.result()
             rows.append(analyze(tag, d, log, worst_dir))
-    lines = ['%-14s %5s %7s %-12s %7s %5s %5s %8s' % ('run', 'shots', 'worst', 'frame', 'windows', 'slow', 'loads', 'heaviest')]
-    for tag, n, share, name, nwin, slow, loads, heavy in rows:
-        lines.append('%-14s %5d %6.2f%% %-12s %7d %5d %5d %8d' % (tag, n, share * 100, name or '-', nwin, slow, loads, heavy))
+    lines = ['%-14s %5s %7s %-12s %7s %7s %5s %5s %8s' % ('run', 'shots', 'worst', 'frame', 'behind', 'windows', 'slow', 'loads', 'heaviest')]
+    for tag, n, share, name, strip, nwin, slow, loads, heavy in rows:
+        lines.append('%-14s %5d %6.2f%% %-12s %6.2f%% %7d %5d %5d %8d' % (tag, n, share * 100, name or '-', strip * 100, nwin, slow, loads, heavy))
     text = '\n'.join(lines)
     with open(os.path.join(args.out, 'summary.txt'), 'w') as f:
         f.write(text + '\n')

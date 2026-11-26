@@ -13,6 +13,10 @@ typedef struct ViewMap {
   int top_offset;
   int offset;
   bool hud_overlay;
+  // Nonzero: the pause menu's sprites (the box and its letters) are shown
+  // at this offset instead, in the middle of the screen, the level staying
+  // where it is.
+  int menu_offset;
   // Squashed instead (split and offsets unused): rows 32-223, without the
   // HUD, on the 160 lines; text rows are kept whole.
   //   kSquashTitle: the 32 rows to lose spread over all that isn't text;

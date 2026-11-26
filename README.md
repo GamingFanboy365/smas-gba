@@ -75,7 +75,10 @@ Saves go in the cartridge's SRAM, 8 KB per game, as on the SNES.
 art is shown 1:1, as the *Super Mario Advance* games do: 240 of the 256
 columns, the HUD drawn over the top of the level instead of taking a strip
 of the screen, and a camera that rests at the bottom (the ground always in
-view) and rises only when Mario goes high, easing as it moves. The title
+view) and rises only when Mario goes high, easing as it moves. The clouds
+behind the HUD, on the same SNES layer as the HUD, are shown there by
+another GBA layer for those lines. Pausing leaves the level where it is, as
+on the SNES, and shows the pause menu in the middle of the screen. The title
 screen and the screens between levels (the "WORLD 1-1" card, Game Over, Time
 Up) drop the HUD instead and show the 192 rows below it on the 160 lines,
 choosing the 32 rows that go by what's in them: rows of text are never
@@ -100,8 +103,11 @@ after each game frame, as on the PC. Its DSP writes go to a mixer in ARM
 code in fast RAM (`gba/mixer.iwram.c`, `gba/mixer_asm.S`): eight voices at
 13379 Hz, the DSP's envelopes, volumes, pitch and noise, played from
 samples decoded at cartridge-build time (`tools/spc_image.py`), mixed from
-an interrupt so that a slow game frame never starves the sound. There is no
-echo.
+an interrupt so that a slow game frame never starves the sound. Envelopes
+are stepped every 32 samples, each voice's volume gliding sample by sample
+from one step to the next so that notes fade out without clicks. The
+output is the GBA's 8 bits a channel, as loud as the loudest sound effects
+allow. There is no echo.
 
 ## Testing
 
@@ -134,8 +140,9 @@ tools/mgba/smrun smas.gba -n 1200 -f $(llvm-nm build/smas.elf | awk '/ g_game_fr
 
 `tools/sweep.py` does that for every level of a game, from its start and
 from its halfway point: a scripted run on both, a picture every 50 frames
-compared, and the speed of each second of play. Its summary lists each run's
-worst picture and the windows that ran slow.
+compared (below the HUD, and behind it), and the speed of each second of
+play. Its summary lists each run's worst picture and the windows that ran
+slow.
 
 ```bash
 python3 tools/sweep.py --cart smas.gba --elf build/smas.elf --roms roms --out out-sweep --game smb1
