@@ -424,9 +424,10 @@ ROM_CODE static void BuildSquashMap(int mode, int vofs3, int vofs1) {
   // with the text: the font's glyphs have their fill in rows 1-6 and their
   // outlines in 0 and 7. BG3 has the HUD (rows 0-31), BG2 the menus below.
   // The full squash keeps 168 of 224 and drops the first and last 4 more;
-  // the title's (rows 32 on, only each tile row's last row dropped) keeps
-  // 168 of 192 and drops 4 and 4 too.
-  int first = mode == kSquashTitle ? 32 : 0;
+  // the title's (rows 30 on, below the HUD's digits, only each tile row's
+  // last row dropped) keeps 169 of 194, the last 9 off the bottom.
+  int first = mode == kSquashTitle ? 30 : 0;
+  int skip = mode == kSquashTitle ? 0 : 4;  // kept rows cut at the top
   int kept = 0, g = 0;
   for (int r = 0; r < kSnesLines; r++) {
     if (r < first) {
@@ -435,7 +436,7 @@ ROM_CODE static void BuildSquashMap(int mode, int vofs3, int vofs1) {
     }
     int phase = ((r < 32 ? vofs3 : vofs1) + r + 1) & 7;
     bool keep = mode == kSquashTitle ? phase != 7 : (phase != 0 && phase != 7);
-    if (keep && kept++ >= 4 && g < kGbaLines) s_rowmap[g++] = r;
+    if (keep && kept++ >= skip && g < kGbaLines) s_rowmap[g++] = r;
     s_linemap[r] = g < kGbaLines ? g : kGbaLines;
   }
   while (g < kGbaLines) s_rowmap[g] = s_rowmap[g - 1], g++;
@@ -461,6 +462,34 @@ static void BuildOam(uint16_t *out, const ViewMap *vm, const uint8_t *obj_prio) 
   SnesPpu *p = &g_snes->ppu;
   const uint8_t *sizes = kObjSizes[p->obsel >> 5];
   static const uint8_t kPix[4] = { 8, 16, 32, 64 };
+  // Squashed, each group of sprites drawn together (consecutive in OAM and
+  // touching: Mario's eight tiles, a Koopa's) moves as one, by its bottom
+  // row's place in the row map, so it keeps its shape and its feet stay on
+  // the ground. s_shift is each sprite's move: SNES row minus GBA line.
+  static int16_t s_shift[128];
+  if (vm->squash) {
+    int start = 0;
+    for (int i = 0; i <= 128; i++) {
+      bool joins = false;
+      if (i > 0 && i < 128) {
+        const uint8_t *a = &g_snes_oam[(i - 1) * 4], *b = &g_snes_oam[i * 4];
+        int dx = a[0] - b[0], dy = a[1] - b[1];
+        joins = dx >= -16 && dx <= 16 && dy >= -16 && dy <= 16;
+      }
+      if (i == 128 || (i > 0 && !joins)) {
+        int bottom = 0;
+        for (int k = start; k < i; k++) {
+          uint8_t hb = g_snes_oam[0x200 + (k >> 2)] >> ((k & 3) * 2);
+          int b = g_snes_oam[k * 4 + 1] + kPix[sizes[(hb >> 1) & 1]] - 1;
+          if (g_snes_oam[k * 4 + 1] < kSnesLines && b > bottom) bottom = b;
+        }
+        if (bottom >= kSnesLines) bottom = kSnesLines - 1;
+        int shift = bottom - s_linemap[bottom];
+        for (int k = start; k < i; k++) s_shift[k] = shift;
+        start = i;
+      }
+    }
+  }
   for (int i = 0; i < 128; i++) {
     const uint8_t *o = &g_snes_oam[i * 4];
     uint8_t hb = g_snes_oam[0x200 + (i >> 2)] >> ((i & 3) * 2);
@@ -473,7 +502,7 @@ static void BuildOam(uint16_t *out, const ViewMap *vm, const uint8_t *obj_prio) 
     // Which region of the view it falls in, by its top line.
     int gy = y - vm->offset;
     if (vm->squash)
-      gy = y < 0 ? y + s_linemap[0] : y >= kSnesLines ? kGbaLines : s_linemap[y];
+      gy = y - s_shift[i];
     else if (vm->split && !vm->hud_overlay && y < vm->split + vm->top_offset)
       gy = y - vm->top_offset;
     int gx = x - vm->xoffset;
