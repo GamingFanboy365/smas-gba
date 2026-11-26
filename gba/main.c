@@ -43,13 +43,13 @@ static uint16_t ReadJoypad(void) {
 }
 
 // The view. In a level: the whole 160 lines are the level, with BG3's HUD
-// rows (SNES rows 14-29) drawn over its top, as the Super Mario Advance games
-// do; the camera rests at the bottom, so the ground shows, and rises only
-// when Mario climbs or jumps high. Between levels: the HUD (rows 8-31) pinned
-// in a strip and the screen's content below it. The title: its middle.
+// rows (SNES rows 14-30: its two rows of text, from the line above their
+// outline to the outline's last) drawn over its top, as the Super Mario
+// Advance games do; the camera rests at the bottom, so the ground shows, and
+// rises only when Mario climbs or jumps high. The title and the screens
+// between levels: without the HUD, squashed a little (see render.h).
 enum {
-  kHudLines = 24, kHudTop = 8,          // the pinned strip
-  kOverlayLines = 16, kOverlayTop = 14, // the overlaid HUD
+  kOverlayLines = 17, kOverlayTop = 14, // the overlaid HUD
   kMaxOffset = 64,                      // SNES rows 64-223: the floor at the bottom
   kHeadroom = 40,                       // lines kept above Mario's head
 };
@@ -100,7 +100,8 @@ static void UpdateView(ViewMap *vm) {
     vm->offset = s_cam;
     return;
   }
-  // The intro card and the other screens between levels: squashed.
+  // The intro card and the other screens between levels: without the HUD
+  // too, giving up their empty rows.
   vm->squash = kSquashFull;
   s_cam = kMaxOffset;
 }

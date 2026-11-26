@@ -13,11 +13,12 @@ typedef struct ViewMap {
   int top_offset;
   int offset;
   bool hud_overlay;
-  // Squashed instead (split and offsets unused):
-  //   kSquashFull: the whole 224 rows in 160 lines, each 8-row tile row of
-  //     the text layer losing its first and last row (screens between levels);
-  //   kSquashTitle: rows 32-223, without the HUD, its text rows whole and
-  //     the 32 rows to lose spread over the rest (the title).
+  // Squashed instead (split and offsets unused): rows 32-223, without the
+  // HUD, on the 160 lines; text rows are kept whole.
+  //   kSquashTitle: the 32 rows to lose spread over all that isn't text;
+  //   kSquashFull: blank rows go first, the margins before the gaps, so
+  //     that a card's text and picture aren't squashed at all (the screens
+  //     between levels).
   uint8_t squash;
 } ViewMap;
 

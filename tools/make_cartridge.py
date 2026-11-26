@@ -89,6 +89,17 @@ def build_assets(roms):
     return assets
 
 
+# The logo a GBA's BIOS checks in the header before it starts a cartridge
+# (bytes 4-159): without it real hardware shows its own logo and stops. The
+# engine leaves the space blank; this is what gbafix writes there.
+HEADER_LOGO = bytes.fromhex(
+    '24ffae51699aa2213d84820a84e409ad11248b98c0817f21a352be199309ce20'
+    '10464a4af82731ec58c7e83382e3cebf85f4df94ce4b09c194568ac01372a7fc'
+    '9f844d73a3ca9a615897a327fc039876231dc7610304ae56bf38840040a70efd'
+    'ff52fe036f9530f197fbc08560d68025a963be03014e38e2f9a234ffbb3e0344'
+    '780090cb88113a9465c07c6387f03cafd625e48b380aac7221d4f807')
+
+
 def pack(engine, assets):
     out = bytearray(engine)
     out += b'\0' * (-len(out) % 256)
@@ -108,7 +119,9 @@ def pack(engine, assets):
     out += block
     if len(out) > 32 << 20:
         sys.exit('cartridge is over 32 MB')
-    # The header's complement check.
+    # The header: the logo and the complement check.
+    assert len(HEADER_LOGO) == 156
+    out[4:160] = HEADER_LOGO
     chk = (-(sum(out[0xa0:0xbd]) + 0x19)) & 0xff
     out[0xbd] = chk
     return bytes(out)

@@ -9,7 +9,7 @@ run (holding right, jumping now and then, with star power poked in so the
 run gets somewhere) goes through tools/hostrun and tools/mgba/smrun, with a
 picture every 50 game frames. Each GBA picture is compared with the
 reference's 240 middle columns at the vertical offset that fits best, below
-the HUD (lines 16-159); squashed screens (the cards between levels) and
+the HUD (lines 18-159); squashed screens (the cards between levels) and
 blank frames are left out. The summary lists, per run, the worst share of
 differing pixels, and the speed: the 60-frame windows that took more than
 61 VBlanks once the level is under way, and the heaviest window's cycles a
@@ -91,9 +91,9 @@ def compare(ref_path, gba_path):
     if gba.max() < 16 or ref.max() < 16:
         return None  # blank
     best = None
-    part = gba[16:160]
+    part = gba[18:160]
     for off in range(0, 65):
-        diff = np.abs(ref[off + 16:off + 160] - part).max(axis=2) > 12
+        diff = np.abs(ref[off + 18:off + 160] - part).max(axis=2) > 12
         share = diff.mean()
         if best is None or share < best[0]:
             best = (share, off)

@@ -42,14 +42,18 @@ Mario World*, unheadered or headered, sha1
 python3 tools/make_cartridge.py --rom smas.sfc --engine build/smas-engine.gba -o smas.gba
 ```
 
-`smas.gba` runs in any GBA emulator (mGBA is what it's tested in). For a
-flash cartridge on real hardware, fix up the header with `gbafix smas.gba`
-first: the build leaves the BIOS's logo area blank.
+`smas.gba` runs in GBA emulators (it's tested in mGBA and in VBA-M) and is
+made for real hardware too: `make_cartridge.py` completes the header (the
+logo the BIOS checks, the checksum), so no `gbafix` is needed, the save type
+is marked for flash cartridges (`SRAM_V113`, 32 KB), and the startup code
+resets whatever a cartridge's menu left in the video and sound hardware. It
+hasn't been run on a real GBA by its author, though.
 
 ## Playing
 
-A game select comes first: Up, Down or Select to choose, A or Start to
-play. The last choice is remembered.
+A game select comes first: Up, Down or Select to choose (with the cursor
+sound of the All-Stars menu), A or Start to play. The last choice is
+remembered.
 
 | GBA | In the games |
 |---|---|
@@ -72,10 +76,12 @@ art is shown 1:1, as the *Super Mario Advance* games do: 240 of the 256
 columns, the HUD drawn over the top of the level instead of taking a strip
 of the screen, and a camera that rests at the bottom (the ground always in
 view) and rises only when Mario goes high, easing as it moves. The title
-screen and the screens between levels are squashed to fit instead. The
-title drops the HUD and keeps every row of its text, taking the 32 rows it
-must lose evenly from everything else; the intro card keeps the HUD and
-drops each text row's top and bottom (outline) rows.
+screen and the screens between levels (the "WORLD 1-1" card, Game Over, Time
+Up) drop the HUD instead and show the 192 rows below it on the 160 lines,
+choosing the 32 rows that go by what's in them: rows of text are never
+touched; the title takes them evenly from everything else; the cards take
+empty rows first, their margins before the gaps, so that their text and
+pictures aren't squashed at all.
 
 **Video.** `gba/snes_hw.iwram.c` models the SNES registers, VRAM, CGRAM and
 OAM the game writes, DMA and HDMA, and runs the frame's lines with the
@@ -126,19 +132,32 @@ tools/hostrun/hostrun roms/smb1.sfc -n 900 -k "-*200 start*2 -*150 start*2 -*150
 tools/mgba/smrun smas.gba -n 1200 -f $(llvm-nm build/smas.elf | awk '/ g_game_frame$/{print $1}') -K "-*30 a*2 -*10" -k "-*200 start*2 -*150 start*2 -*150 start*2 -*100 right*300" -s 600,800 -o out
 ```
 
-The scenes checked: the titles and menus of both games, the intro cards,
-1-1, 1-2 (underground), 2-2 (underwater), 1-4 (castle), the pause menu,
-saving and loading, The Lost Levels' 1-1.
+`tools/sweep.py` does that for every level of a game, from its start and
+from its halfway point: a scripted run on both, a picture every 50 frames
+compared, and the speed of each second of play. Its summary lists each run's
+worst picture and the windows that ran slow.
+
+```bash
+python3 tools/sweep.py --cart smas.gba --elf build/smas.elf --roms roms --out out-sweep --game smb1
+```
+
+Besides the sweeps of both games, the scenes checked by eye: the titles and
+menus, the cards between levels, Game Over and Time Up, the pause menu,
+saving and loading.
 
 ## Status and limits
 
-Both games play from the title through their levels with sound and saves.
-The title, 1-1, the underground and the castles run at 60 frames a second
-(with a dip while a level loads); the water levels at about 47, the GBA's
-CPU being full there. No echo in the sound. Levels and screens beyond those
-listed above haven't been checked against the PC version picture by
-picture; the renderer is general, but a scene using a SNES effect not seen
-in those may need work.
+Both games play from the title through their levels with sound and saves,
+at 60 frames a second: in the sweeps no second of play in any level, the
+water levels included, runs slow. A level's load and the moments after a
+death take a few frames longer than on the SNES (the new level's tiles are
+converted while the screen is dark).
+
+The sweeps' pictures match the PC version's but for the mosaic effect of
+The Lost Levels' pipe transitions, whose blocks line up differently on the
+GBA. There is no echo in the sound. Worlds reached only by finishing the
+games (The Lost Levels' 9 and A to D) and the endings haven't been checked
+picture by picture.
 
 ## Credits and licenses
 

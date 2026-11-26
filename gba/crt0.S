@@ -21,7 +21,24 @@ _start:
   .byte 0x00                   @ complement check, filled in later
   .byte 0x00, 0x00             @ reserved
 
+  @ The save type, for flash cartridges and emulators that look for it:
+  @ 32 KB of battery-backed SRAM.
+  .align 2
+  .ascii "SRAM_V113"
+  .align 2
+
 start_vector:
+  @ A flash cartridge's menu (or anything else that ran before) may have
+  @ left the video memory and the I/O registers in any state: the BIOS's
+  @ RegisterRamReset clears the palettes, VRAM and OAM and resets the
+  @ serial, sound and other registers (not EWRAM and IWRAM: those are set
+  @ up below). It uses the supervisor stack.
+  mov   r0, #0x13
+  msr   cpsr_c, r0
+  ldr   sp, =__sp_svc
+  mov   r0, #0xfc
+  swi   0x010000
+
   @ Stacks for IRQ, supervisor and system mode; we run in system mode.
   mov   r0, #0x12
   msr   cpsr_c, r0

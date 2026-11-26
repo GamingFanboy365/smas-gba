@@ -99,46 +99,24 @@ ROM_CODE static void InitSpread(void) {
   }
 }
 
-// On the screens between levels (the full squash) the text layer's tiles
-// lose rows 0 and 7. BG1/BG2's tiles are converted with them merged into
-// rows 1 and 6: the inner row's pixel where it has one, the dropped row's
-// where it's empty. BG3's font (the HUD, white over the sky) reads better
-// left alone. The title keeps its text rows whole and needs none of it.
-static uint8_t s_tiles_squashed;  // the kSquash mode the BG tiles are in
+// The squash mode the maps were converted for: the title moves its cursor
+// (see ConvertMapChunk).
+static uint8_t s_tiles_squashed;
 
-// a's pixels where a has one, b's elsewhere.
-static inline uint32_t MergeRows(uint32_t a, uint32_t b) {
-  uint32_t m = (a | a >> 1 | a >> 2 | a >> 3) & 0x11111111;
-  m *= 0xf;
-  return (a & m) | (b & ~m);
-}
-
-static void Convert4bpp(volatile uint32_t *dst, const uint16_t *src, bool merge) {
+static void Convert4bpp(volatile uint32_t *dst, const uint16_t *src) {
   const uint32_t *sp = s_spread;
-  uint32_t rows[8];
   for (int y = 0; y < 8; y++) {
     uint32_t lo = src[y], hi = src[y + 8];
-    rows[y] = sp[lo & 0xff] | sp[lo >> 8] << 1 | sp[hi & 0xff] << 2 | sp[hi >> 8] << 3;
+    dst[y] = sp[lo & 0xff] | sp[lo >> 8] << 1 | sp[hi & 0xff] << 2 | sp[hi >> 8] << 3;
   }
-  if (merge) {
-    rows[1] = MergeRows(rows[1], rows[0]);
-    rows[6] = MergeRows(rows[6], rows[7]);
-  }
-  for (int y = 0; y < 8; y++) dst[y] = rows[y];
 }
 
-static void Convert2bpp(volatile uint32_t *dst, const uint16_t *src, bool merge) {
+static void Convert2bpp(volatile uint32_t *dst, const uint16_t *src) {
   const uint32_t *sp = s_spread;
-  uint32_t rows[8];
   for (int y = 0; y < 8; y++) {
     uint32_t lo = src[y];
-    rows[y] = sp[lo & 0xff] | sp[lo >> 8] << 1;
+    dst[y] = sp[lo & 0xff] | sp[lo >> 8] << 1;
   }
-  if (merge) {
-    rows[1] = MergeRows(rows[0], rows[1]);
-    rows[6] = MergeRows(rows[7], rows[6]);
-  }
-  for (int y = 0; y < 8; y++) dst[y] = rows[y];
 }
 
 static inline uint16_t MapEntry(uint16_t e, int layer) {
@@ -194,20 +172,20 @@ static void ConvertChunk(uint32_t a) {
   if (InRange(a, s_bg12_base, 0x4000)) {
     uint32_t t = (a - s_bg12_base) >> 4;
     if (t != kBlankTile12)
-      Convert4bpp((volatile uint32_t *)(VRAM + t * 16), src, s_tiles_squashed == kSquashFull);
+      Convert4bpp((volatile uint32_t *)(VRAM + t * 16), src);
   }
   if (InRange(a, s_bg3_base, 0x800)) {
     uint32_t t = (a - s_bg3_base) >> 3;
     for (int k = 0; k < 2; k++, t++)
       if (t < kSolidTile3)
-        Convert2bpp((volatile uint32_t *)(VRAM + 0x4000 + t * 16), src + k * 8, false);
+        Convert2bpp((volatile uint32_t *)(VRAM + 0x4000 + t * 16), src + k * 8);
   }
   for (int n = 0; n < 2; n++) {
     if (InRange(a, s_obj_base[n], 0x1000)) {
       uint32_t t = ((a - s_obj_base[n]) >> 4) + n * 256;
       uint32_t g = (t >> 4) * 32 + (t & 15);
       volatile uint32_t *d = (volatile uint32_t *)(VRAM_OBJ + g * 16);
-      Convert4bpp(d, src, false);
+      Convert4bpp(d, src);
       for (int y = 0; y < 8; y++) d[y + 128] = d[y];  // the copy 16 tiles on
     }
   }
@@ -454,77 +432,184 @@ EWRAM_BSS static uint8_t s_rowmap[kGbaLines];
 static uint16_t s_rowmap_version;
 EWRAM_BSS static int16_t s_linemap[kSnesLines];
 
-// The title's text bands: rows of BG1's map with the font's tiles (0x00-
-// 0x2f, not the blank 0x24, 0x28). Its rows are kept whole; the title's
-// other rows give up the 32 that must go, spread evenly.
-ROM_CODE static bool TitleTextBand(int map_row) {
-  const uint16_t *m = &g_snes_vram[s_map_base[0] + (map_row & 31) * 32];
-  for (int c = 0; c < 32; c++) {
-    uint16_t t = m[c] & 0x3ff;
-    if (t < 0x30 && t != 0x24 && t != 0x28) return true;
+// Squashed screens show rows 32-223, without the HUD: 192 rows on 160
+// lines. Which 32 go is chosen by what the rows hold:
+//   text rows (a map row with a tile of the font, 0x00-0x2f, on BG1/BG2, or
+//     anything on BG3; but for tiles that are blank or one color) stay whole;
+//   blank rows (map rows of tiles whose eight rows are the same, in every
+//     layer, and no sprite) can go unseen;
+//   the others (pictures) lose rows evenly when they must.
+// The title gives up its 32 evenly from all that isn't text, its sky
+// included. The screens between levels give up blank rows first: the empty
+// margins above and below, then the gaps, so that the card's text and
+// picture are whole.
+static const uint8_t kObjSizes[8][2] = {
+  {0, 1}, {0, 2}, {0, 3}, {1, 2}, {1, 3}, {2, 3}, {1, 2}, {1, 2},
+};
+
+enum { kRowBlank, kRowOther, kRowText };
+enum { kSquashFirst = 32, kSquashMinMargin = 8 };
+
+// Whether the tile's eight rows are the same: one fewer of them isn't seen.
+ROM_CODE static bool FlatTile(int layer, int t) {
+  if (layer == 2) {
+    const uint16_t *td = &g_snes_vram[(s_bg3_base + t * 8) & 0x7fff];
+    for (int y = 1; y < 8; y++)
+      if (td[y] != td[0]) return false;
+    return true;
   }
+  const uint16_t *td = &g_snes_vram[(s_bg12_base + t * 16) & 0x7fff];
+  for (int y = 1; y < 8; y++)
+    if (td[y] != td[0] || td[y + 8] != td[8]) return false;
+  return true;
+}
+
+ROM_CODE static int BandClass(int layer, int map_row) {
+  const uint16_t *m = &g_snes_vram[(s_map_base[layer] + (map_row & 31) * 32) & 0x7fff];
+  int c = kRowBlank, last = -1;
+  bool flat = false;
+  for (int k = 0; k < 32; k++) {
+    int t = m[k] & 0x3ff;
+    if (t != last) last = t, flat = FlatTile(layer, t);
+    if (flat) continue;
+    if (layer == 2 || t < 0x30) return kRowText;
+    c = kRowOther;
+  }
+  return c;
+}
+
+// Marks n of the rows from..to-1 of class cls (any with cls < 0) that aren't
+// dropped yet, evenly spread; returns how many it could.
+ROM_CODE static int DropEvenly(uint8_t *drop, const uint8_t *cls, int from, int to, int want, int n) {
+  int avail = 0;
+  for (int r = from; r < to; r++) avail += !drop[r] && (want < 0 || cls[r] == want);
+  if (n > avail) n = avail;
+  if (n <= 0) return 0;
+  int acc = 0;
+  for (int r = from; r < to; r++) {
+    if (drop[r] || (want >= 0 && cls[r] != want)) continue;
+    acc += n;
+    if (acc >= avail) acc -= avail, drop[r] = 1;
+  }
+  return n;
+}
+
+// Whether any of VRAM's n runs of 512 words from base were written this frame.
+ROM_CODE static bool WrittenAt(uint32_t base, int n) {
+  for (int i = 0; i < n; i++)
+    if (g_vram_dirty[((base >> 9) + i) & 63]) return true;
   return false;
 }
 
-ROM_CODE static void BuildSquashMap(int mode, int vofs3, int vofs1) {
-  static int last_mode = -1, last3 = -1, last1 = -1;
-  // The title's text is on BG1: its bands follow BG1's scroll.
-  if (mode == kSquashTitle) vofs1 = LineScroll(kSnesLines / 2, 0) >> 16;
-  static uint32_t last_bands;
-  uint32_t bands = 0;
-  if (mode == kSquashTitle) {
-    for (int b = 0; b < 32; b++)
-      if (TitleTextBand(b)) bands |= 1u << b;
+// Whether the rows' classes may have changed since they were last worked
+// out: the maps or the font's tiles written, the layers shown or their
+// scrolling changed, a sprite moved. (Not BG3's tiles: the HUD's coin is
+// redrawn every eight frames, and they're all there before a screen is.)
+// While the screen is dark, a screen being set up, anything written to VRAM
+// counts, but the work waits for the first frame that shows.
+ROM_CODE static bool SquashInputsChanged(int mode) {
+  static uint32_t last_sig;
+  static bool pending = true;
+  SnesPpu *p = &g_snes->ppu;
+  if ((p->inidisp & 0x80) || !(p->inidisp & 0xf)) {
+    if (WrittenAt(0, 64)) pending = true;
+    return false;
   }
-  if (mode == last_mode && vofs3 == last3 && vofs1 == last1 && bands == last_bands) return;
-  last_mode = mode, last3 = vofs3, last1 = vofs1, last_bands = bands;
+  bool changed = pending;
+  pending = false;
+  for (int l = 0; l < (mode == kSquashTitle ? 1 : 3); l++)
+    if (WrittenAt(s_map_base[l], 2)) changed = true;
+  if (WrittenAt(s_bg12_base, 2)) changed = true;
+  uint32_t sig = mode;
+  for (int r = kSquashFirst + 8; r < kSnesLines; r += 88) {
+    const LineRegs *st = &g_line_states[g_line_state_of(r)];
+    sig = sig * 31 + (st->tm | st->ts << 8);
+    for (int l = 0; l < 3; l++) sig = sig * 31 + (LineScroll(r, l) >> 16);
+  }
+  if (mode != kSquashTitle) {
+    sig = sig * 31 + p->obsel;
+    for (int i = 0; i < 128; i++) sig = sig * 31 + g_snes_oam[i * 4 + 1];
+    for (int i = 0; i < 32; i++) sig = sig * 31 + g_snes_oam[0x200 + i];
+  }
+  if (sig != last_sig) changed = true;
+  last_sig = sig;
+  return changed;
+}
+
+ROM_CODE static void BuildSquashMap(int mode) {
+  static int last_mode = -1;
+  if (!SquashInputsChanged(mode)) return;
+  EWRAM_BSS static uint8_t s_drop[kSnesLines], s_last_drop[kSnesLines], s_cls[kSnesLines];
+  EWRAM_BSS static uint8_t s_band[3][32];
+  uint8_t *drop = s_drop, *cls = s_cls;
+  memset(s_band, 0xff, sizeof(s_band));
+  memset(drop, 0, kSnesLines);
+  // The title's text is on BG1, over a sky that isn't to go first.
+  int layers = mode == kSquashTitle ? 1 : 7;
+  for (int r = kSquashFirst; r < kSnesLines; r++) {
+    const LineRegs *st = &g_line_states[g_line_state_of(r)];
+    int shown = (st->tm | st->ts) & layers, c = kRowBlank;
+    for (int l = 0; l < 3; l++) {
+      if (!(shown >> l & 1)) continue;
+      int band = (((LineScroll(r, l) >> 16) + r + 1) >> 3) & 31;
+      if (s_band[l][band] == 0xff) s_band[l][band] = BandClass(l, band);
+      if (s_band[l][band] > c) c = s_band[l][band];
+    }
+    cls[r] = (mode == kSquashTitle && c == kRowBlank) ? kRowOther : c;
+  }
+  if (mode != kSquashTitle) {
+    // The rows the sprites are on aren't blank.
+    const uint8_t *sizes = kObjSizes[g_snes->ppu.obsel >> 5];
+    for (int i = 0; i < 128; i++) {
+      const uint8_t *o = &g_snes_oam[i * 4];
+      if (o[1] >= kSnesLines) continue;
+      uint8_t hb = g_snes_oam[0x200 + (i >> 2)] >> ((i & 3) * 2);
+      int h = 8 << sizes[(hb >> 1) & 1];
+      for (int r = o[1]; r < o[1] + h && r < kSnesLines; r++)
+        if (cls[r] == kRowBlank) cls[r] = kRowOther;
+    }
+  }
+  int left = (kSnesLines - kSquashFirst) - kGbaLines;
+  // The blank margins at the top and bottom first, down to a small one each,
+  // and evened out.
+  int top = 0, bottom = 0;
+  while (kSquashFirst + top < kSnesLines && cls[kSquashFirst + top] == kRowBlank) top++;
+  while (kSquashFirst + top + bottom < kSnesLines && cls[kSnesLines - 1 - bottom] == kRowBlank) bottom++;
+  int from_margins = top + bottom - 2 * kSquashMinMargin;
+  if (from_margins > left) from_margins = left;
+  if (from_margins > 0) {
+    int rest = top + bottom - from_margins;
+    int t = rest / 2;
+    if (t > top) t = top;
+    int b = rest - t;
+    if (b > bottom) b = bottom, t = rest - b;
+    for (int r = kSquashFirst; r < kSquashFirst + top - t; r++) drop[r] = 1;
+    for (int r = kSnesLines - (bottom - b); r < kSnesLines; r++) drop[r] = 1;
+    left -= from_margins;
+  }
+  // Then the blank rows between, then the pictures', then whatever is left.
+  left -= DropEvenly(drop, cls, kSquashFirst + top, kSnesLines - bottom, kRowBlank, left);
+  left -= DropEvenly(drop, cls, kSquashFirst, kSnesLines, kRowOther, left);
+  DropEvenly(drop, cls, kSquashFirst, kSnesLines, -1, left);
+
+  if (mode == last_mode && !memcmp(drop, s_last_drop, kSnesLines)) return;
+  last_mode = mode;
+  memcpy(s_last_drop, drop, kSnesLines);
   s_rowmap_version++;
   int g = 0;
-  if (mode == kSquashTitle) {
-    // Rows 32-223 (no HUD): text rows kept, 32 of the others dropped.
-    enum { kFirst = 32 };
-    bool text[kSnesLines];
-    int droppable = 0;
-    for (int r = kFirst; r < kSnesLines; r++) {
-      int band = ((vofs1 + r + 1) >> 3) & 31;
-      text[r] = (bands >> band) & 1;
-      droppable += !text[r];
+  for (int r = 0; r < kSnesLines; r++) {
+    if (r < kSquashFirst) {
+      s_linemap[r] = -1 - (kSquashFirst - 1 - r);
+      continue;
     }
-    int to_drop = (kSnesLines - kFirst) - kGbaLines, seen = 0;
-    for (int r = 0; r < kSnesLines; r++) {
-      if (r < kFirst) {
-        s_linemap[r] = -1 - (kFirst - 1 - r);
-        continue;
-      }
-      bool keep = true;
-      if (!text[r] && droppable > 0) {
-        // Drop this one if it takes the running count of drops up a step.
-        keep = (seen + 1) * to_drop / droppable == seen * to_drop / droppable;
-        seen++;
-      }
-      if (keep && g < kGbaLines) s_rowmap[g++] = r;
-      s_linemap[r] = g < kGbaLines ? g : kGbaLines;
-    }
-  } else {
-    // The whole screen: rows that aren't the first or last of a tile row of
-    // the text layer kept (the font's glyphs have their fill in rows 1-6,
-    // outlines in 0 and 7; BG3 has the HUD, rows 0-31, BG2 the rest), 168
-    // of 224, and the first and last 4 of those dropped too.
-    int kept = 0;
-    for (int r = 0; r < kSnesLines; r++) {
-      int phase = ((r < 32 ? vofs3 : vofs1) + r + 1) & 7;
-      if (phase != 0 && phase != 7 && kept++ >= 4 && g < kGbaLines) s_rowmap[g++] = r;
-      s_linemap[r] = g < kGbaLines ? g : kGbaLines;
-    }
+    if (!drop[r] && g < kGbaLines) s_rowmap[g++] = r;
+    s_linemap[r] = g < kGbaLines ? g : kGbaLines;
   }
   while (g < kGbaLines) s_rowmap[g] = s_rowmap[g - 1], g++;
 }
 
 // ---- sprites ----
 
-static const uint8_t kObjSizes[8][2] = {
-  {0, 1}, {0, 2}, {0, 3}, {1, 2}, {1, 3}, {2, 3}, {1, 2}, {1, 2},
-};
 
 __attribute__((noinline)) static uint8_t ObjPriosUsed(void) {
   uint8_t used = 0;
@@ -673,8 +758,7 @@ void RenderBuildFrame(const ViewMap *vm) {
 
   fr->blank = (p->inidisp & 0x80) != 0;
   fr->squash = vm->squash;
-  if (vm->squash)
-    BuildSquashMap(vm->squash, LineScroll(0, 2) >> 16, LineScroll(kSnesLines - 1, 1) >> 16);
+  if (vm->squash) BuildSquashMap(vm->squash);
   uint8_t tm = g_line_states[g_line_state_of(0)].tm, ts = g_line_states[g_line_state_of(0)].ts;
   bool sub_add = (p->cgwsel & 2) && (p->cgadsub & 0x20) && !(p->cgadsub & 0x1f);
   uint8_t sub_mask = sub_add ? ts : 0;
@@ -911,11 +995,8 @@ ROM_CODE void RenderPresent(void) {
 
   CheckLayout();
   if (fr->squash != s_tiles_squashed) {
-    // Only BG1/BG2's tiles are converted differently.
+    // BG1's map is converted differently for the title (its cursor).
     s_tiles_squashed = fr->squash;
-    for (uint32_t a = s_bg12_base; a < (uint32_t)s_bg12_base + 0x4000; a += 16)
-      g_vram_dirty[(a & 0x7fff) >> 9] |= 1u << ((a >> 4) & 31);
-    // And BG1's map (the title's cursor).
     for (uint32_t a = s_map_base[0]; a < (uint32_t)s_map_base[0] + 0x800; a += 16)
       g_vram_dirty[(a & 0x7fff) >> 9] |= 1u << ((a >> 4) & 31);
   }
