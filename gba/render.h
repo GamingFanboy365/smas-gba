@@ -17,6 +17,10 @@ typedef struct ViewMap {
   // at this offset instead, in the middle of the screen, the level staying
   // where it is.
   int menu_offset;
+  // OAM entries [pin_first, pin_first + pin_count) (Lakitu's) are kept in
+  // view: above the lines below the HUD, they're drawn just under it, at
+  // their own x. pin_count 0: none.
+  uint8_t pin_first, pin_count;
   // Squashed instead (split and offsets unused): rows 32-223, without the
   // HUD, on the 160 lines; text rows are kept whole.
   //   kSquashTitle: the 32 rows to lose spread over all that isn't text;

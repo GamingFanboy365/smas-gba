@@ -685,6 +685,18 @@ __attribute__((noinline)) static void BuildOam(uint16_t *out, const ViewMap *vm,
       }
     }
   }
+  // The pinned sprites (Lakitu): moved down together, by as much as keeps
+  // their top on the first line below the HUD.
+  int pin_shift = 0, pin_end = vm->pin_first + vm->pin_count;
+  if (vm->pin_count && !vm->squash) {
+    int top = kSnesLines;
+    for (int i = vm->pin_first; i < pin_end; i++) {
+      int y = g_snes_oam[i * 4 + 1];
+      if (y < kSnesLines && y < top) top = y;
+    }
+    int first_line = vm->hud_overlay ? vm->split : 0;
+    if (top < kSnesLines && top - vm->offset < first_line) pin_shift = first_line - (top - vm->offset);
+  }
   for (int i = 0; i < 128; i++) {
     const uint8_t *o = &g_snes_oam[i * 4];
     if (o[1] == 0xf0) {
@@ -704,6 +716,7 @@ __attribute__((noinline)) static void BuildOam(uint16_t *out, const ViewMap *vm,
     // The pause menu's: attributes 0x21, tiles 0x1c0-0x1ff.
     if (vm->menu_offset && o[3] == 0x21 && o[2] >= 0xc0)
       gy = y - vm->menu_offset;
+    if (pin_shift && i >= vm->pin_first && i < pin_end && y < kSnesLines) gy += pin_shift;
     if (vm->squash)
       gy = y - s_shift[i];
     else if (vm->split && !vm->hud_overlay && y < vm->split + vm->top_offset)

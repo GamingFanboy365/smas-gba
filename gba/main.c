@@ -20,6 +20,10 @@ enum {
   kRam_GameModeTask = 0x772,
   kRam_PlayerSize = 0x754,  // 0 big, 1 small
   kRam_PauseMenu = 0x776,   // display_pause_menu_flag (both games)
+  kRam_EnemyFlag = 0x10,    // enemy_flag[6]: the slot is in use
+  kRam_EnemyId = 0x1c,      // enemy_id[6]
+  kRam_EnemySprOffset = 0xb46,  // enemy_obj_id[6]: its OAM entries from 64 + this / 4
+  kEnemyLakitu = 17,
   kRam_World = 0x75f,
   kRam_CutsceneFlag = 0x1680, // cutscene_var1680: Peach in every castle
 };
@@ -88,6 +92,7 @@ static void UpdateView(ViewMap *vm) {
   vm->hud_overlay = false;
   vm->squash = kSquashNone;
   vm->menu_offset = 0;
+  vm->pin_count = 0;
   uint8_t mode = RAM8(kRam_GameMode), task = RAM8(kRam_GameModeTask);
   int want = mode == 0 ? kViewTitle
            : ((mode == 1 && task >= 3) || mode == 2) ? kViewLevel : kViewBetween;
@@ -129,6 +134,15 @@ static void UpdateView(ViewMap *vm) {
     // screen (lines 40-119); the level stays put. (Over the ending's text,
     // after PUSH START, it stays where the SNES has it, on the text.)
     if ((RAM8(kRam_PauseMenu) & 1) && mode != 2) vm->menu_offset = 24;
+    // Lakitu flies above the rows the view shows: his sprites (six) are
+    // drawn just under the HUD instead, so he and his Spinies can be seen.
+    for (int k = 0; k < 6; k++) {
+      if (RAM8(kRam_EnemyFlag + k) && RAM8(kRam_EnemyId + k) == kEnemyLakitu) {
+        int first = 64 + RAM8(kRam_EnemySprOffset + k) / 4;
+        if (first + 6 <= 128) vm->pin_first = first, vm->pin_count = 6;
+        break;
+      }
+    }
     // Ease toward it: up quickly (Mario can move 5 lines a frame), down slowly.
     if (target < s_cam) s_cam -= (s_cam - target > 6) ? 6 : s_cam - target;
     else if (target > s_cam) s_cam += (target - s_cam > 3) ? 3 : target - s_cam;

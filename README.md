@@ -86,7 +86,9 @@ of the screen, and a camera that rests at the bottom (the ground always in
 view) and rises only when Mario goes high, easing as it moves. The clouds
 behind the HUD, on the same SNES layer as the HUD, are shown there by
 another GBA layer for those lines. Pausing leaves the level where it is, as
-on the SNES, and shows the pause menu in the middle of the screen. The
+on the SNES, and shows the pause menu in the middle of the screen.
+Lakitu, who flies above the rows the view shows, is drawn just under the
+HUD, so that he and his Spinies can be seen coming. The
 ending's text is shown without the HUD, in the middle of the screen, and its
 portrait in its circle (the SNES's window, drawn with a GBA window whose
 width is set line by line). The title
