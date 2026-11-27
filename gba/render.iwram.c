@@ -62,6 +62,7 @@ static uint16_t s_prio_total[3];
 typedef struct LineTable {
   uint16_t scroll[kGbaLines + 1][8];
   uint16_t backdrop[kGbaLines + 1];
+  uint16_t win1h[kGbaLines + 1];  // WIN1H, when the SNES's window 1 is shown
 } __attribute__((aligned(4))) LineTable;
 // In EWRAM, not IWRAM: they're 5.8 KB, and IWRAM must leave room for any
 // compiler's code. The HBlank DMAs reading them from there cost little.
@@ -85,6 +86,11 @@ typedef struct FrameRegs {
   // left out by window 0.
   uint8_t cloud_bg, cloud_hide;
   uint16_t cloud_bgcnt, cloud_dispcnt;
+  // The SNES's window 1 hiding layers (the ending's circle): GBA window 1,
+  // its extent per line from the line table (by HBlank DMA3), the layers
+  // shown inside it and outside it.
+  bool win1;
+  uint8_t win1_in, win1_out;
 } FrameRegs;
 static FrameRegs s_regs[2];
 // The frame on screen, for RenderVBlank: its line table (NULL: none), where
@@ -95,6 +101,7 @@ static bool s_front_per_line;
 static uint8_t s_front_split;            // see FrameRegs
 static uint16_t s_front_bgcnt0[2];       // above the split, from it on
 static uint8_t s_front_cloud_bg;         // see FrameRegs
+static bool s_front_win1;
 static uint16_t s_front_cloud_cnt[2], s_front_dispcnt[2];
 EWRAM_BSS static uint16_t s_oam[2][512] __attribute__((aligned(4)));
 static bool s_oam_ready[2];
@@ -815,6 +822,45 @@ ROM_CODE static void FillCloudScroll(LineTable *lt, int k, const ViewMap *vm) {
   }
 }
 
+// The SNES's window 1 hiding layers on the screen, as the ending does (a
+// circle the portrait shows in: the BGs hidden inside it, the sprites
+// outside). Shown with GBA window 1: which of the frame's BGs, and the
+// sprites, show inside it and outside it. Only when it hides a BG (the pause
+// menu's, which only clips its own sprites, is left out) and window 2 isn't
+// used. The sub screen's layers count too: they're drawn on the main.
+ROM_CODE static bool PlanWindow1(FrameRegs *fr, const uint8_t *layer_of, int nbg, uint8_t shown) {
+  SnesPpu *p = &g_snes->ppu;
+  uint8_t sel[5] = { p->w12sel & 15, p->w12sel >> 4, p->w34sel & 15, p->w34sel >> 4, p->wobjsel & 15 };
+  uint8_t masked = p->tmw | p->tsw;
+  uint8_t in = 0x3f, out = 0x3f;
+  bool bg_hidden = false;
+  for (int k = 0; k <= nbg; k++) {
+    int l = k < nbg ? layer_of[k] : 4, bit = k < nbg ? 1 << k : 0x10;
+    if (!(masked & (1 << l)) || !(shown & (1 << l))) continue;
+    if (sel[l] & 8) return false;          // window 2
+    if (!(sel[l] & 2)) continue;           // window 1 not on this layer
+    if (sel[l] & 1) out &= ~bit; else in &= ~bit;
+    if (k < nbg) bg_hidden = true;
+  }
+  fr->win1_in = in, fr->win1_out = out;
+  return bg_hidden;
+}
+
+// Window 1's extent on each line, from the SNES rows' (HDMA writes them).
+ROM_CODE static void FillWindow1(LineTable *lt, const ViewMap *vm) {
+  const RowSeg *seg = s_segs[0], *seg_end = seg + s_nsegs[0];
+  for (; seg < seg_end; seg++) {
+    for (int g = seg->g0; g < seg->g1; g++) {
+      const LineRegs *lr = &g_line_states[g_line_state_of(g + seg->delta)];
+      int x1 = lr->wh[0] - vm->xoffset, x2 = lr->wh[1] + 1 - vm->xoffset;
+      if (x1 < 0) x1 = 0;
+      if (x2 > 240) x2 = 240;
+      lt->win1h[g] = x1 < x2 ? x1 << 8 | x2 : 0;
+    }
+  }
+  lt->win1h[kGbaLines] = lt->win1h[kGbaLines - 1];
+}
+
 // ---- the frame ----
 
 ROM_CODE void RenderInit(void) {
@@ -930,6 +976,8 @@ void RenderBuildFrame(const ViewMap *vm) {
     dispcnt |= DCNT_BG0 << (k + k0);
   }
   if (!(tm & 0x10)) dispcnt &= ~DCNT_OBJ;
+  fr->win1 = (p->w12sel | p->w34sel) & 0x22 ? PlanWindow1(fr, layer_of, k0 + lp.nbg, tm | ts) : false;
+  if (fr->win1) dispcnt |= DCNT_WIN1;
   fr->dispcnt = dispcnt;
   if (fr->cloud_bg) {
     fr->cloud_dispcnt = dispcnt | (DCNT_BG0 << fr->cloud_bg);
@@ -1026,6 +1074,7 @@ void RenderBuildFrame(const ViewMap *vm) {
       }
     }
   }
+  if (fr->win1) FillWindow1(lt, vm);
   if (fr->cloud_bg) {
     // Filled whole again next time: its top isn't what its kind of fill left.
     s_col_ver[b][fr->cloud_bg] = 0;
@@ -1131,6 +1180,12 @@ ROM_CODE void RenderPresent(void) {
   s_front_bgcnt0[0] = fr->bgcnt[0];
   s_front_bgcnt0[1] = fr->bgcnt0_bottom;
   s_front_cloud_bg = fr->cloud_bg;
+  s_front_win1 = fr->win1;
+  if (fr->win1 || fr->cloud_bg) {
+    REG_WININ = (fr->cloud_bg ? 0x3f & ~(1 << fr->cloud_bg) : 0x3f) | fr->win1_in << 8;
+    REG_WINOUT = fr->win1 ? fr->win1_out : 0x3f;
+    REG_WIN1V = kGbaLines;
+  }
   if (fr->cloud_bg) {
     s_front_cloud_cnt[0] = fr->cloud_bgcnt;
     s_front_cloud_cnt[1] = fr->bgcnt[fr->cloud_bg];
@@ -1138,8 +1193,6 @@ ROM_CODE void RenderPresent(void) {
     s_front_dispcnt[1] = fr->dispcnt;
     REG_WIN0H = 240;
     REG_WIN0V = fr->cloud_hide;
-    REG_WININ = 0x3f & ~(1 << fr->cloud_bg);
-    REG_WINOUT = 0x3f;
   }
   s_front = lt;
   RenderVBlank();
@@ -1170,7 +1223,15 @@ void RenderVBlank(void) {
   REG_DMA_DAD(0) = 0x04000010;
   REG_DMA_CNT(0) = 4 | DMA_32 | DMA_DST_RELOAD | DMA_REPEAT | DMA_AT_HBLANK | DMA_ENABLE;
   *s_front_color = lt->backdrop[0];
-  if (s_front_per_line) {
+  if (s_front_win1) {
+    // DMA3 brings window 1's extent instead (the backdrop stays line 0's:
+    // the screens with the window don't vary it).
+    REG_WIN1H = lt->win1h[0];
+    REG_DMA_CNT(3) = 0;
+    REG_DMA_SAD(3) = (uint32_t)&lt->win1h[1];
+    REG_DMA_DAD(3) = (uint32_t)&REG_WIN1H;
+    REG_DMA_CNT(3) = 1 | DMA_16 | DMA_DST_FIXED | DMA_REPEAT | DMA_AT_HBLANK | DMA_ENABLE;
+  } else if (s_front_per_line) {
     REG_DMA_CNT(3) = 0;
     REG_DMA_SAD(3) = (uint32_t)&lt->backdrop[1];
     REG_DMA_DAD(3) = (uint32_t)s_front_color;

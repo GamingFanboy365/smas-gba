@@ -49,8 +49,8 @@ python3 tools/make_cartridge.py --rom smas.sfc --engine build/smas-engine.gba -o
 made for real hardware too: `make_cartridge.py` completes the header (the
 logo the BIOS checks, the checksum), so no `gbafix` is needed, the save type
 is marked for flash cartridges (`SRAM_V113`, 32 KB), and the startup code
-resets whatever a cartridge's menu left in the video and sound hardware. It
-hasn't been run on a real GBA by its author, though.
+resets whatever a cartridge's menu left in the video and sound hardware. A
+player has run it on an EZ-Flash Omega in a GBA SP.
 
 ## Playing
 
@@ -62,11 +62,15 @@ remembered.
 | GBA | In the games |
 |---|---|
 | D-pad | move, menus |
-| A | jump (the SNES's B) |
-| B | run, fireballs (the SNES's Y) |
+| A | jump (the SNES's B); in menus, choose (as Start) |
+| B or R | run, fireballs (the SNES's Y) |
 | Start | pause menu: continue, save and continue, save and quit |
 | Select | menus |
 | A + B + Select + Start | save and go back to the game select |
+
+Save and quit, in the pause or Game Over menu, goes back to the game select,
+as in All-Stars. A pressed while a menu is up chooses; held down from play
+into a menu (dying with it held, say) it stays a jump and chooses nothing.
 
 The SNES games' controller setting ("B- JUMP") is gone from the player
 select: the GBA's buttons are already its default.
@@ -82,7 +86,10 @@ of the screen, and a camera that rests at the bottom (the ground always in
 view) and rises only when Mario goes high, easing as it moves. The clouds
 behind the HUD, on the same SNES layer as the HUD, are shown there by
 another GBA layer for those lines. Pausing leaves the level where it is, as
-on the SNES, and shows the pause menu in the middle of the screen. The title
+on the SNES, and shows the pause menu in the middle of the screen. The
+ending's text is shown without the HUD, in the middle of the screen, and its
+portrait in its circle (the SNES's window, drawn with a GBA window whose
+width is set line by line). The title
 screen and the screens between levels (the "WORLD 1-1" card, Game Over, Time
 Up) drop the HUD instead and show the 192 rows below it on the 160 lines,
 choosing the 32 rows that go by what's in them: rows of text are never
@@ -166,9 +173,10 @@ converted while the screen is dark).
 
 The sweeps' pictures match the PC version's but for the mosaic effect of
 The Lost Levels' pipe transitions, whose blocks line up differently on the
-GBA. There is no echo in the sound. Worlds reached only by finishing the
-games (The Lost Levels' 9 and A to D) and the endings haven't been checked
-picture by picture.
+GBA. There is no echo in the sound. Super Mario Bros.' ending and the
+castles' Toad scenes were checked against the PC version; worlds reached
+only by finishing the games (The Lost Levels' 9 and A to D) and The Lost
+Levels' ending haven't been checked picture by picture.
 
 ## Credits and licenses
 

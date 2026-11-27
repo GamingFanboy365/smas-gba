@@ -20,15 +20,34 @@ enum {
   kRam_GameModeTask = 0x772,
   kRam_PlayerSize = 0x754,  // 0 big, 1 small
   kRam_PauseMenu = 0x776,   // display_pause_menu_flag (both games)
+  kRam_World = 0x75f,
+  kRam_CutsceneFlag = 0x1680, // cutscene_var1680: Peach in every castle
 };
 
+// Whether the game shows a menu that Start confirms: the title and file
+// select, the pause menu, the Game Over menu, and the castle's and the
+// ending's text (PUSH START).
+static bool InMenu(void) {
+  uint8_t mode = RAM8(kRam_GameMode);
+  return mode == 0 || mode == 2 || mode == 3 || (RAM8(kRam_PauseMenu) & 1);
+}
+
 // The GBA's buttons as the SNES joypad word (B Y Sel Start U D L R A X L R).
-// A jumps and B runs, as on the NES: they are the SNES's B and Y.
+// A jumps and B runs, as on the NES: they are the SNES's B and Y; R runs
+// too, as in Super Mario Advance 4. In a menu, A pressed there confirms, as
+// Start does. What A is goes with the press: held from play into a menu
+// (dying with it down, say) it stays a jump and picks nothing, and a press
+// that confirmed a menu doesn't jump when the game resumes under it.
+static bool s_a_down, s_a_is_start;
 static uint16_t ReadJoypad(void) {
   uint16_t k = ~REG_KEYINPUT & 0x3ff;
   uint16_t j = 0;
-  if (k & KEY_A) j |= 0x8000;
-  if (k & KEY_B) j |= 0x4000;
+  if (k & KEY_A) {
+    if (!s_a_down) s_a_is_start = InMenu();
+    j |= s_a_is_start ? 0x1000 : 0x8000;
+  }
+  s_a_down = (k & KEY_A) != 0;
+  if (k & (KEY_B | KEY_R)) j |= 0x4000;
   if (k & KEY_SELECT) j |= 0x2000;
   if (k & KEY_START) j |= 0x1000;
   if (k & KEY_UP) j |= 0x0800;
@@ -36,7 +55,6 @@ static uint16_t ReadJoypad(void) {
   if (k & KEY_LEFT) j |= 0x0200;
   if (k & KEY_RIGHT) j |= 0x0100;
   if (k & KEY_L) j |= 0x0020;
-  if (k & KEY_R) j |= 0x0010;
   if ((j & 0x0c00) == 0x0c00) j &= ~0x0c00;
   if ((j & 0x0300) == 0x0300) j &= ~0x0300;
   return j;
@@ -52,6 +70,8 @@ enum {
   kOverlayLines = 17, kOverlayTop = 14, // the overlaid HUD
   kMaxOffset = 64,                      // SNES rows 64-223: the floor at the bottom
   kHeadroom = 40,                       // lines kept above Mario's head
+  kVictoryOffset = 55,                  // SNES rows 55-214 after the axe
+  kEndingOffset = 47,                   // SNES rows 47-206: the ending's text in the middle
 };
 static int s_cam = kMaxOffset;
 
@@ -64,6 +84,7 @@ static uint8_t s_view_kind = kViewTitle, s_view_wait;
 
 static void UpdateView(ViewMap *vm) {
   vm->xoffset = 8;
+  vm->split = 0;
   vm->hud_overlay = false;
   vm->squash = kSquashNone;
   vm->menu_offset = 0;
@@ -82,9 +103,16 @@ static void UpdateView(ViewMap *vm) {
     return;
   }
   if (s_view_kind == kViewLevel) {
-    vm->split = kOverlayLines;
-    vm->top_offset = kOverlayTop;
-    vm->hud_overlay = true;
+    // The ending's text, Peach's (her cutscene's task 8 on, in both games):
+    // SNES rows 64-189 with PUSH START, too tall for the HUD and it both,
+    // so it's shown without the HUD, in the middle of the screen.
+    bool ending_text = mode == 2 && task >= 8 &&
+                       (RAM8(kRam_World) >= 7 || RAM8(kRam_CutsceneFlag));
+    if (!ending_text) {
+      vm->split = kOverlayLines;
+      vm->top_offset = kOverlayTop;
+      vm->hud_overlay = true;
+    }
     // Mario's box is 32 lines tall from his y; small Mario is its lower half.
     int y = (RAM8(kRam_PlayerYHi) - 1) * 256 + RAM8(kRam_PlayerYLo);
     int head = y + (RAM8(kRam_PlayerSize) ? 16 : 0);
@@ -93,9 +121,14 @@ static void UpdateView(ViewMap *vm) {
     // Below the overlaid HUD the level shows rows from offset + 16; above
     // row 32, BG3 is the SNES's own HUD, which would show twice.
     if (target < 32 - kOverlayLines) target = 32 - kOverlayLines;
+    // After the axe (victory mode): Toad's message (SNES rows 80-135) well
+    // below the HUD, the floor's top (rows 208-214) still in view; the
+    // ending's text, without the HUD, in the middle.
+    if (mode == 2) target = ending_text ? kEndingOffset : kVictoryOffset;
     // The pause menu's box (SNES rows 64-143) is shown in the middle of the
-    // screen (lines 40-119); the level stays put.
-    if (RAM8(kRam_PauseMenu) & 1) vm->menu_offset = 24;
+    // screen (lines 40-119); the level stays put. (Over the ending's text,
+    // after PUSH START, it stays where the SNES has it, on the text.)
+    if ((RAM8(kRam_PauseMenu) & 1) && mode != 2) vm->menu_offset = 24;
     // Ease toward it: up quickly (Mario can move 5 lines a frame), down slowly.
     if (target < s_cam) s_cam -= (s_cam - target > 6) ? 6 : s_cam - target;
     else if (target > s_cam) s_cam += (target - s_cam > 3) ? 3 : target - s_cam;
@@ -138,7 +171,14 @@ static void RunGame(void) {
       return;
     }
     uint32_t t0 = CycleCount();
-    GameRunFrame(ReadJoypad());
+    if (GameRunFrame(ReadJoypad())) {
+      // Save & Quit: back to the game select, as All-Stars goes back to its
+      // own menu.
+      GameSyncSram(true);
+      AudioStop();
+      RenderStop();
+      return;
+    }
     uint32_t t1 = CycleCount();
     UpdateView(&vm);
     RenderBuildFrame(&vm);

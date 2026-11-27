@@ -277,6 +277,21 @@ int main(int argc, char **argv) {
         if (*q == ',') q++; else break;
       }
     }
+    // The GBA build's A in menus (gba/main.c): pressed while the title, the
+    // pause or Game Over menu or a castle's text is up, it's Start, until
+    // let go; so the same script does the same on both.
+    {
+      static bool a_down, a_is_start;
+      bool a = keys & 1;
+      if (a) {
+        if (!a_down) {
+          uint8 mode = g_ram[0x770];
+          a_is_start = mode == 0 || mode == 2 || mode == 3 || (g_ram[0x776] & 1);
+        }
+        if (a_is_start) keys = (keys & ~1u) | 8;
+      }
+      a_down = a;
+    }
     RtlRunFrame(keys);
     if (af) {
       RtlRenderAudio(audio_buf, 534, 2);

@@ -51,7 +51,7 @@ void GameStart(const GameDef *game) {
   s_need_reset = true;
 }
 
-void GameRunFrame(uint16_t joy1) {
+bool GameRunFrame(uint16_t joy1) {
   g_game_frame++;
   g_snes->joy1 = joy1;
   if (s_need_reset) {
@@ -61,12 +61,12 @@ void GameRunFrame(uint16_t joy1) {
   g_game->frame();
   if (*g_game->want_reset) {
     *g_game->want_reset = false;
-    g_game->reset();
-    g_game->frame();
+    return true;
   }
   g_game->nmi();
   SnesRunLines(g_game->irq);
   AudioEndFrame();
+  return false;
 }
 
 void GameSyncSram(bool all) {
