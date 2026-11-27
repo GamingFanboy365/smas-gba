@@ -512,18 +512,43 @@ ROM_CODE static bool WrittenAt(uint32_t base, int n) {
   return false;
 }
 
+// The rows any sprite has been on since the screen was last dark, a bit a
+// row: they aren't blank. Kept, not redone each frame, so that a blinking
+// cursor or a walking enemy neither moves the rows about nor has them all
+// worked out again (which takes longer than a frame).
+static uint32_t s_sprite_rows[(kSnesLines + 31) / 32];
+
+// Adds the rows the sprites are on now; returns whether that added any.
+ROM_CODE static bool AddSpriteRows(void) {
+  const uint8_t *sizes = kObjSizes[g_snes->ppu.obsel >> 5];
+  bool added = false;
+  for (int i = 0; i < 128; i++) {
+    const uint8_t *o = &g_snes_oam[i * 4];
+    if (o[1] >= kSnesLines) continue;
+    uint8_t hb = g_snes_oam[0x200 + (i >> 2)] >> ((i & 3) * 2);
+    int end = o[1] + (8 << sizes[(hb >> 1) & 1]);
+    if (end > kSnesLines) end = kSnesLines;
+    for (int r = o[1]; r < end; r++) {
+      uint32_t bit = 1u << (r & 31);
+      if (!(s_sprite_rows[r >> 5] & bit)) s_sprite_rows[r >> 5] |= bit, added = true;
+    }
+  }
+  return added;
+}
+
 // Whether the rows' classes may have changed since they were last worked
 // out: the maps or the font's tiles written, the layers shown or their
-// scrolling changed, a sprite moved. (Not BG3's tiles: the HUD's coin is
-// redrawn every eight frames, and they're all there before a screen is.)
-// While the screen is dark, a screen being set up, anything written to VRAM
-// counts, but the work waits for the first frame that shows.
+// scrolling changed, a sprite on a row none was on. (Not BG3's tiles: the
+// HUD's coin is redrawn every eight frames, and they're all there before a
+// screen is.) While the screen is dark, a screen being set up, anything
+// written to VRAM counts, but the work waits for the first frame that shows.
 ROM_CODE static bool SquashInputsChanged(int mode) {
   static uint32_t last_sig;
   static bool pending = true;
   SnesPpu *p = &g_snes->ppu;
   if ((p->inidisp & 0x80) || !(p->inidisp & 0xf)) {
     if (WrittenAt(0, 64)) pending = true;
+    memset(s_sprite_rows, 0, sizeof(s_sprite_rows));
     return false;
   }
   bool changed = pending;
@@ -537,11 +562,7 @@ ROM_CODE static bool SquashInputsChanged(int mode) {
     sig = sig * 31 + (st->tm | st->ts << 8);
     for (int l = 0; l < 3; l++) sig = sig * 31 + (LineScroll(r, l) >> 16);
   }
-  if (mode != kSquashTitle) {
-    sig = sig * 31 + p->obsel;
-    for (int i = 0; i < 128; i++) sig = sig * 31 + g_snes_oam[i * 4 + 1];
-    for (int i = 0; i < 32; i++) sig = sig * 31 + g_snes_oam[0x200 + i];
-  }
+  if (mode != kSquashTitle && AddSpriteRows()) changed = true;
   if (sig != last_sig) changed = true;
   last_sig = sig;
   return changed;
@@ -569,16 +590,9 @@ ROM_CODE static void BuildSquashMap(int mode) {
     cls[r] = (mode == kSquashTitle && c == kRowBlank) ? kRowOther : c;
   }
   if (mode != kSquashTitle) {
-    // The rows the sprites are on aren't blank.
-    const uint8_t *sizes = kObjSizes[g_snes->ppu.obsel >> 5];
-    for (int i = 0; i < 128; i++) {
-      const uint8_t *o = &g_snes_oam[i * 4];
-      if (o[1] >= kSnesLines) continue;
-      uint8_t hb = g_snes_oam[0x200 + (i >> 2)] >> ((i & 3) * 2);
-      int h = 8 << sizes[(hb >> 1) & 1];
-      for (int r = o[1]; r < o[1] + h && r < kSnesLines; r++)
-        if (cls[r] == kRowBlank) cls[r] = kRowOther;
-    }
+    // The rows the sprites are on, or have been, aren't blank.
+    for (int r = kSquashFirst; r < kSnesLines; r++)
+      if (cls[r] == kRowBlank && (s_sprite_rows[r >> 5] >> (r & 31) & 1)) cls[r] = kRowOther;
   }
   int left = (kSnesLines - kSquashFirst) - kGbaLines;
   // The blank margins at the top and bottom first, down to a small one each,
