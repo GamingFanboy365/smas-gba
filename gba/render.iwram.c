@@ -63,7 +63,9 @@ typedef struct LineTable {
   uint16_t scroll[kGbaLines + 1][8];
   uint16_t backdrop[kGbaLines + 1];
 } __attribute__((aligned(4))) LineTable;
-IWRAM_BSS static LineTable s_tables[2];
+// In EWRAM, not IWRAM: they're 5.8 KB, and IWRAM must leave room for any
+// compiler's code. The HBlank DMAs reading them from there cost little.
+EWRAM_BSS static LineTable s_tables[2];
 static int s_back;
 
 // What RenderPresent puts in the registers.

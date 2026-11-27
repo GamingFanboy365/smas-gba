@@ -22,8 +22,11 @@ version of them to port, and the GBA is far too slow to emulate a SNES.
 
 ## Building
 
-You need clang and lld (LLVM 16 or later; no GCC or devkitARM), CMake,
-Ninja and Python 3 with the `zstandard` module (`pip install zstandard`).
+You need clang and lld (LLVM 17 or later; it's built and checked with 17,
+18, 19 and 20; no GCC or devkitARM), CMake, Ninja and Python 3 with the
+`zstandard` module (`pip install zstandard`). To pick a clang that isn't
+the one called `clang`, add `-DGBA_CLANG=clang-20` (for example) to the
+first command.
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/gba-toolchain.cmake
